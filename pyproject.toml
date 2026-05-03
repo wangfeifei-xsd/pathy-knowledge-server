@@ -1,0 +1,22 @@
+[project]
+name = "pathy-knowledge-server"
+version = "0.1.0"
+description = "Karpathy-style knowledge base REST service (MVP)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.12",
+    "openai>=1.57.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.28.0", "ruff>=0.8.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
