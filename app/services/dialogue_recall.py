@@ -1,13 +1,16 @@
-"""自然语言 wiki 召回：BM25 + Markdown 标题切块 + 标题命中加权；对话测试在此基础上再调 LLM。"""
+"""自然语言 wiki 召回：BM25 + 向量双路召回，合并去重后轻量 rerank。"""
 
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import HTTPException
+from openai import AsyncOpenAI
 
 from app.config import Settings
 from app.models.schemas import (
@@ -27,10 +30,13 @@ from app.services.llm_tasks import (
     _strip_think_blocks,
     _usage_from_completion,
 )
+from app.services.llm_config import compute_effective_embedding_model, resolve_embedding_api_key
 from app.services.recall_stopwords import read_effective_stopwords
+from app.services.vector_index import search_wiki_vectors
 
 _re_word = re.compile(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+")
 _HEADING_LINE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+logger = logging.getLogger("pathy")
 
 # BM25（Okapi）常数
 _BM25_K1 = 1.2
@@ -120,6 +126,22 @@ def _split_chunks(text: str, max_chars: int) -> list[str]:
     return [c for c in chunks if c]
 
 
+def _is_meaningful_body(text: str) -> bool:
+    """过滤空正文与仅分隔符（如 --- / *** / ___）的无意义片段。"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    # 全部行为 Markdown 水平分隔线时，视为无意义正文。
+    for ln in lines:
+        if re.fullmatch(r"[-*_]{3,}", ln):
+            continue
+        return True
+    return False
+
+
 def _parse_md_sections(text: str) -> list[tuple[str, str]]:
     """按 Markdown 标题切成 (heading_path, body)。path 为「父级 > 当前」链。"""
     lines = (text or "").replace("\r\n", "\n").split("\n")
@@ -167,7 +189,7 @@ def _wiki_indexed_chunks(rel: str, full: str, max_chars: int) -> list[_IndexedCh
         sections = _parse_md_sections(full)
         indexed: list[_IndexedChunk] = []
         for path, body in sections:
-            if not body.strip() and not path:
+            if not _is_meaningful_body(body):
                 continue
             if len(body) <= max_chars:
                 indexed.append(_IndexedChunk(rel, path, body))
@@ -270,6 +292,7 @@ _INJECTED_EMPTY_FOR_LLM = (
 _INJECTED_EMPTY_RECALL_ONLY = "(本次召回未命中 wiki 片段。)"
 
 RECALL_METHOD_BM25 = "bm25"
+RECALL_METHOD_HYBRID = "hybrid_bm25_vector"
 
 
 @dataclass(frozen=True)
@@ -282,13 +305,119 @@ class WikiKeywordRecallArtifacts:
     context_truncated: bool
 
 
-def perform_wiki_keyword_recall(
+async def _score_chunks_vector_with_model(
+    settings: Settings,
+    query: str,
+    wiki_prefix: str,
+    top_n: int,
+) -> list[tuple[float, _IndexedChunk]]:
+    """模型向量召回：query embedding 后在已嵌入索引里做余弦检索。"""
+    if not query.strip():
+        return []
+    em = compute_effective_embedding_model(settings)
+    key = resolve_embedding_api_key(settings)
+    if not key:
+        logger.warning("dialogue_recall vector embedding_api_key_missing")
+        return []
+    kwargs: dict[str, object] = {"api_key": key, "timeout": em.timeout_seconds, "max_retries": 0}
+    if em.base_url:
+        kwargs["base_url"] = em.base_url
+    client = AsyncOpenAI(**kwargs)
+    try:
+        emb = await client.embeddings.create(model=em.model, input=[query])
+    except Exception as e:
+        logger.warning("dialogue_recall vector embedding_failed model=%s error=%s", em.model, str(e))
+        return []
+    qv = emb.data[0].embedding
+    hits = search_wiki_vectors(settings, qv, wiki_prefix, top_n)
+    logger.info(
+        "dialogue_recall vector_done prefix=%s top_n=%d hits=%d model=%s",
+        wiki_prefix or "/",
+        top_n,
+        len(hits),
+        em.model,
+    )
+    return [(h.score, _IndexedChunk(h.rel, h.heading_path, h.body)) for h in hits]
+
+
+def _min_max_norm(v: float, lo: float, hi: float) -> float:
+    if hi <= lo:
+        return 1.0 if v > 0 else 0.0
+    x = (v - lo) / (hi - lo)
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+@dataclass(frozen=True)
+class _MergedCandidate:
+    chunk: _IndexedChunk
+    bm25_score: float
+    vector_score: float
+    rerank_score: float
+
+
+def _merge_and_rerank_candidates(
+    bm25_scored: list[tuple[float, _IndexedChunk]],
+    vector_scored: list[tuple[float, _IndexedChunk]],
+    terms: list[str],
+) -> list[_MergedCandidate]:
+    merged: dict[tuple[str, str, str], dict[str, float | _IndexedChunk]] = {}
+    for sc, ch in bm25_scored:
+        k = (ch.rel, ch.heading_path, ch.body)
+        cur = merged.get(k)
+        if not cur:
+            merged[k] = {"chunk": ch, "bm25": sc, "vector": 0.0}
+        else:
+            cur["bm25"] = max(float(cur["bm25"]), sc)
+    for sc, ch in vector_scored:
+        k = (ch.rel, ch.heading_path, ch.body)
+        cur = merged.get(k)
+        if not cur:
+            merged[k] = {"chunk": ch, "bm25": 0.0, "vector": sc}
+        else:
+            cur["vector"] = max(float(cur["vector"]), sc)
+
+    bm_vals = [float(v["bm25"]) for v in merged.values()]
+    vec_vals = [float(v["vector"]) for v in merged.values()]
+    bm_lo, bm_hi = (min(bm_vals), max(bm_vals)) if bm_vals else (0.0, 0.0)
+    ve_lo, ve_hi = (min(vec_vals), max(vec_vals)) if vec_vals else (0.0, 0.0)
+
+    out: list[_MergedCandidate] = []
+    for v in merged.values():
+        ch = v["chunk"]
+        bm = float(v["bm25"])
+        ve = float(v["vector"])
+        nb = _min_max_norm(bm, bm_lo, bm_hi)
+        nv = _min_max_norm(ve, ve_lo, ve_hi)
+        title_low = ch.heading_path.lower()
+        title_hit = 1.0 if any(t in title_low for t in terms) else 0.0
+        # 轻量规则 rerank：BM25 与向量加权融合 + 标题命中微调
+        rr = 0.55 * nb + 0.4 * nv + 0.05 * title_hit
+        out.append(_MergedCandidate(chunk=ch, bm25_score=bm, vector_score=ve, rerank_score=rr))
+
+    out.sort(
+        key=lambda x: (
+            -x.rerank_score,
+            -x.bm25_score,
+            -x.vector_score,
+            x.chunk.rel,
+            x.chunk.heading_path,
+        )
+    )
+    return out
+
+
+async def perform_wiki_keyword_recall(
     settings: Settings,
     body: DialogueRecallBaseParams,
     *,
     empty_injected_text: str = _INJECTED_EMPTY_FOR_LLM,
 ) -> WikiKeywordRecallArtifacts:
-    """wiki 层 BM25 召回（标题切块、停用词、标题加权）。"""
+    """wiki 层双路召回（BM25 + 向量）并轻量 rerank。"""
+    started_at = time.perf_counter()
     q = (body.query or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="query 不能为空")
@@ -299,6 +428,17 @@ def perform_wiki_keyword_recall(
     raw_terms = _extract_query_terms(q)
     stopwords = set(read_effective_stopwords(settings))
     terms = _filter_terms(raw_terms, stopwords)
+    logger.info(
+        "dialogue_recall start query_len=%d wiki_prefix=%s max_files=%d top_k=%d bm25_top_n=%d vector_top_n=%d terms_raw=%d terms_kept=%d",
+        len(q),
+        (body.wiki_prefix or "").strip() or "/",
+        body.max_files,
+        body.top_k_chunks,
+        body.bm25_top_n,
+        body.vector_top_n,
+        len(raw_terms),
+        len(terms),
+    )
 
     prefix = (body.wiki_prefix or "").strip()
     pairs = _collect_wiki_pairs(data_root, prefix, body.max_files, settings.max_file_bytes)
@@ -306,15 +446,48 @@ def perform_wiki_keyword_recall(
     all_chunks: list[_IndexedChunk] = []
     for rel, full in pairs:
         all_chunks.extend(_wiki_indexed_chunks(rel, full, body.chunk_max_chars))
+    logger.info(
+        "dialogue_recall indexed files_scanned=%d chunks_total=%d",
+        len(pairs),
+        len(all_chunks),
+    )
 
-    scored = _score_chunks_bm25(all_chunks, terms)
-    scored.sort(key=lambda x: (-x[0], x[1].rel, x[1].heading_path))
-    top = scored[: body.top_k_chunks]
+    bm25_scored = _score_chunks_bm25(all_chunks, terms)
+    bm25_scored.sort(key=lambda x: (-x[0], x[1].rel, x[1].heading_path))
+    bm25_top = bm25_scored[: body.bm25_top_n]
+    logger.info(
+        "dialogue_recall bm25_done candidates=%d kept_top=%d",
+        len(bm25_scored),
+        len(bm25_top),
+    )
+
+    vector_scored = await _score_chunks_vector_with_model(
+        settings,
+        q,
+        prefix,
+        body.vector_top_n,
+    )
+    vector_scored.sort(key=lambda x: (-x[0], x[1].rel, x[1].heading_path))
+    vector_top = vector_scored[: body.vector_top_n]
+
+    merged_ranked = _merge_and_rerank_candidates(bm25_top, vector_top, terms)
+    # 兜底过滤：无论来自 BM25 还是向量索引，均剔除空正文/仅分隔符正文。
+    meaningful_ranked = [it for it in merged_ranked if _is_meaningful_body(it.chunk.body)]
+    top = meaningful_ranked[: body.top_k_chunks]
+    logger.info(
+        "dialogue_recall merge_done vector_candidates=%d vector_top=%d merged=%d meaningful=%d top_k_selected=%d",
+        len(vector_scored),
+        len(vector_top),
+        len(merged_ranked),
+        len(meaningful_ranked),
+        len(top),
+    )
 
     candidates: list[tuple[float, str, str, str]] = []
     block_lines: list[str] = []
-    for sc, ch in top:
-        candidates.append((sc, ch.rel, ch.heading_path, ch.body))
+    for item in top:
+        ch = item.chunk
+        candidates.append((item.rerank_score, ch.rel, ch.heading_path, ch.body))
         block_lines.append(_format_injected_block(ch.rel, ch.heading_path, ch.body))
 
     blocks, ctx_truncated = _trim_context(block_lines, body.context_budget_chars)
@@ -329,6 +502,14 @@ def perform_wiki_keyword_recall(
         hits.append(DialogueRecallHit(path=rel, score=round(sc, 6), snippet=snip))
 
     injected = "\n\n---\n\n".join(blocks) if blocks else empty_injected_text
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        "dialogue_recall done recall_hits=%d context_truncated=%s injected_chars=%d elapsed_ms=%.2f",
+        len(hits),
+        str(ctx_truncated).lower(),
+        len(injected),
+        elapsed_ms,
+    )
 
     return WikiKeywordRecallArtifacts(
         user_query=q,
@@ -340,21 +521,21 @@ def perform_wiki_keyword_recall(
     )
 
 
-def run_dialogue_recall_only(settings: Settings, body: DialogueRecallRequest) -> DialogueRecallResponse:
-    art = perform_wiki_keyword_recall(
+async def run_dialogue_recall_only(settings: Settings, body: DialogueRecallRequest) -> DialogueRecallResponse:
+    art = await perform_wiki_keyword_recall(
         settings,
         body,
         empty_injected_text=_INJECTED_EMPTY_RECALL_ONLY,
     )
     return DialogueRecallResponse(
         user_query=art.user_query,
-        recall_method=RECALL_METHOD_BM25,
+        recall_method=RECALL_METHOD_HYBRID,
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,
         injected_context=art.injected_context,
         context_truncated=art.context_truncated,
-        message="已完成 wiki BM25 召回（未调用 LLM）",
+        message="已完成 wiki 双路召回（BM25 + 向量）并 rerank（未调用 LLM）",
     )
 
 
@@ -362,11 +543,11 @@ async def run_dialogue_recall_test(
     settings: Settings,
     body: DialogueRecallTestRequest,
 ) -> DialogueRecallTestResponse:
-    art = perform_wiki_keyword_recall(settings, body)
+    art = await perform_wiki_keyword_recall(settings, body)
     injected = art.injected_context
 
     system = (body.system_prompt or "").strip() or (
-        "你是知识库问答助手。用户会提供「参考资料」片段（来自本地 wiki 编译层的 BM25 关键词召回）。\n"
+        "你是知识库问答助手。用户会提供「参考资料」片段（来自本地 wiki 编译层 BM25 + 向量双路召回并 rerank）。\n"
         "请优先依据参考资料作答；若资料中没有相关信息，请明确说明「知识库中未找到依据」，不要编造事实。"
     )
     user_msg = (
@@ -399,7 +580,7 @@ async def run_dialogue_recall_test(
         model=eff.model,
         usage=_usage_from_completion(completion.usage),
         user_query=art.user_query,
-        recall_method=RECALL_METHOD_BM25,
+        recall_method=RECALL_METHOD_HYBRID,
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,

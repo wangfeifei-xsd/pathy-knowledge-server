@@ -55,6 +55,33 @@ class LLMSettingsResponse(BaseModel):
     )
 
 
+class BasicModelSettingsResponse(BaseModel):
+    model: str
+    model_source: LLMFieldSource
+    openai_base_url: Optional[str] = None
+    openai_base_url_source: LLMFieldSource
+    openai_timeout_seconds: float
+    openai_timeout_source: LLMFieldSource
+    openai_max_tokens: int
+    openai_max_tokens_source: LLMFieldSource
+    openai_api_key_configured: bool = False
+    env_locks: dict[str, bool] = Field(default_factory=dict)
+    runtime_llm_json: str = Field(default=".pathy/llm.json")
+
+
+class BasicModelSettingsUpdateRequest(BaseModel):
+    model: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    openai_timeout_seconds: Optional[float] = None
+    openai_max_tokens: Optional[int] = None
+    openai_api_key: Optional[str] = None
+
+
+class BasicModelSettingsUpdateResult(BaseModel):
+    settings: BasicModelSettingsResponse
+    warnings: list[str] = Field(default_factory=list)
+
+
 class LLMSettingsUpdateRequest(BaseModel):
     openai_model: Optional[str] = None
     openai_base_url: Optional[str] = None
@@ -76,6 +103,10 @@ class DirEntry(BaseModel):
     path: str
     is_dir: bool
     size: Optional[int] = None
+    embedding_status: Optional[str] = Field(
+        default=None,
+        description="仅 wiki 文件可用：embedded / stale / not_embedded",
+    )
 
 
 class ListLayerResponse(BaseModel):
@@ -174,7 +205,7 @@ class PolishTextResponse(BaseModel):
 
 
 class DialogueRecallBaseParams(BaseModel):
-    """wiki BM25 召回共用参数（与是否调用 LLM 无关）。"""
+    """wiki 双路召回共用参数（与是否调用 LLM 无关）。"""
 
     query: str = Field(..., description="用户自然语言问句或指令")
     wiki_prefix: str = Field(
@@ -182,7 +213,9 @@ class DialogueRecallBaseParams(BaseModel):
         description="仅在此 wiki 子路径下扫描（相对路径，空为整层）",
     )
     max_files: int = Field(default=80, ge=1, le=500, description="最多参与扫描的 .md 文件数")
-    top_k_chunks: int = Field(default=6, ge=1, le=32, description="召回并注入的片段条数上限")
+    bm25_top_n: int = Field(default=10, ge=1, le=100, description="BM25 路召回候选条数")
+    vector_top_n: int = Field(default=10, ge=1, le=100, description="向量路召回候选条数")
+    top_k_chunks: int = Field(default=6, ge=1, le=32, description="合并 rerank 后最终注入的 topK 条数")
     chunk_max_chars: int = Field(
         default=1200,
         ge=400,
@@ -209,6 +242,18 @@ class RecallStopwordsResponse(BaseModel):
     message: str = ""
 
 
+class WikiEmbedRequest(BaseModel):
+    path: str = Field(description="wiki 相对路径，仅支持 .md 文件")
+
+
+class WikiEmbedResponse(BaseModel):
+    path: str
+    chunk_count: int
+    model: str
+    updated_at: str
+    message: str = ""
+
+
 class DialogueRecallRequest(DialogueRecallBaseParams):
     """自然语言 → 仅 wiki 关键词召回（不调用 LLM）。"""
 
@@ -224,7 +269,7 @@ class DialogueRecallTestRequest(DialogueRecallBaseParams):
 
 class DialogueRecallHit(BaseModel):
     path: str = Field(description="wiki 相对路径")
-    score: float = Field(description="关键词重叠得分（越大越相关）")
+    score: float = Field(description="融合重排得分（BM25 + 向量 + 轻量规则，越大越相关）")
     snippet: str = Field(description="片段预览")
 
 
@@ -232,7 +277,7 @@ class DialogueRecallResponse(BaseModel):
     """仅召回阶段结果（无 LLM）。"""
 
     user_query: str
-    recall_method: str = Field(default="bm25", description="召回实现标识（当前为 bm25）")
+    recall_method: str = Field(default="hybrid_bm25_vector", description="召回实现标识（当前为 hybrid_bm25_vector）")
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
@@ -248,7 +293,7 @@ class DialogueRecallTestResponse(BaseModel):
     model: str
     usage: Optional[TaskUsage] = None
     user_query: str
-    recall_method: str = Field(default="bm25", description="召回实现标识（当前为 bm25）")
+    recall_method: str = Field(default="hybrid_bm25_vector", description="召回实现标识（当前为 hybrid_bm25_vector）")
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)

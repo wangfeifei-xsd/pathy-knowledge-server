@@ -42,6 +42,7 @@ def list_dir(
     data_root: Path,
     layer: LayerName,
     prefix: str = "",
+    embedding_status: Optional[dict[str, str]] = None,
 ) -> tuple[str, list[DirEntry]]:
     base = layer_root(data_root, layer)
     target = safe_resolve_under(base, prefix) if prefix else base
@@ -57,6 +58,11 @@ def list_dir(
                 path=posix + ("/" if child.is_dir() else ""),
                 is_dir=child.is_dir(),
                 size=None if child.is_dir() else child.stat().st_size,
+                embedding_status=(
+                    None
+                    if child.is_dir() or layer != LayerName.wiki
+                    else (embedding_status or {}).get(posix, "not_embedded")
+                ),
             )
         )
     return (prefix.rstrip("/"), entries)

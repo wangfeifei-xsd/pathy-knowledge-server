@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.deps import request_logging_middleware
-from app.routers import dialogue_recall, health, layers, llm_settings, meta, tasks
+from app.routers import dialogue_recall, health, layers, llm_settings, meta, tasks, wiki_embedding
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +23,7 @@ _OPENAPI_TAGS = [
     {"name": "LLM 任务", "description": "编译与 Lint 任务"},
     {
         "name": "对话召回",
-        "description": "自然语言 → wiki BM25 召回 → 注入 LLM → 回答（测试流水线）",
+        "description": "自然语言 → wiki BM25 + 向量双路召回（topN）→ 合并去重与轻量 rerank → topK 注入 LLM → 回答（测试流水线）",
     },
 ]
 
@@ -53,6 +53,7 @@ app.include_router(llm_settings.router)
 app.include_router(layers.router)
 app.include_router(tasks.router)
 app.include_router(dialogue_recall.router)
+app.include_router(wiki_embedding.router)
 
 
 @app.on_event("startup")

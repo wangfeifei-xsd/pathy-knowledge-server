@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""端到端自检：临时 DATA_ROOT + wiki 样本 → BM25 /recall HTTP 断言（不调用 LLM）。"""
+"""端到端自检：临时 DATA_ROOT + wiki 样本 → 双路 /recall HTTP 断言（不调用 LLM）。"""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def main() -> int:
     r = client.post("/api/v1/dialogue/recall", json=payload)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body.get("recall_method") == "bm25", body
+    assert body.get("recall_method") == "hybrid_bm25_vector", body
     assert body.get("files_scanned") == 1
     terms = body.get("query_terms") or []
     # 英文数字段不含下划线，pathy_bm25_unique_token 会拆成 pathy / bm25 / unique / token
@@ -70,7 +70,7 @@ def main() -> int:
     p = client.post("/api/v1/tasks/polish-text", json={"content": "hello world test"})
     assert p.status_code != 404, p.text
 
-    print("OK: health + /dialogue/recall (bm25) + polish-text route reachable")
+    print("OK: health + /dialogue/recall (hybrid_bm25_vector) + polish-text route reachable")
     return 0
 
 

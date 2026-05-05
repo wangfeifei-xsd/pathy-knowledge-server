@@ -17,6 +17,7 @@ from app.models.schemas import (
     TaskUsage,
 )
 from app.services import storage
+from app.services.vector_index import delete_wiki_vectors
 from app.services.llm_config import EffectiveLLM, compute_effective_llm, resolve_openai_api_key
 
 # 常见推理模型输出的思考片段（MiniMax / DeepSeek / Qwen 等），写入 wiki 前剥离
@@ -182,6 +183,7 @@ async def run_compile(
         content,
         settings.max_file_bytes,
     )
+    delete_wiki_vectors(data_root, body.output_path)
     written = [body.output_path]
     return CompileTaskResponse(
         model=eff.model,

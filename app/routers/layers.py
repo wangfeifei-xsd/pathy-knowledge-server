@@ -14,6 +14,7 @@ from app.models.schemas import (
     ListLayerResponse,
 )
 from app.services import storage
+from app.services.vector_index import delete_wiki_vectors, get_wiki_embedding_status_map
 
 router = APIRouter(prefix="/api/v1/layers", tags=["三层存储"], dependencies=[Depends(verify_api_key)])
 
@@ -45,7 +46,8 @@ async def list_entries(
     settings: Settings = Depends(get_settings),
 ) -> ListLayerResponse:
     storage.ensure_layer_tree(settings.data_root.resolve())
-    pfx, entries = storage.list_dir(settings.data_root.resolve(), layer, prefix)
+    status_map = get_wiki_embedding_status_map(settings.data_root.resolve()) if layer == LayerName.wiki else None
+    pfx, entries = storage.list_dir(settings.data_root.resolve(), layer, prefix, embedding_status=status_map)
     return ListLayerResponse(layer=layer, prefix=pfx, entries=entries)
 
 
@@ -120,6 +122,8 @@ async def upload_file(
         text,
         settings.max_file_bytes,
     )
+    if layer == LayerName.wiki:
+        delete_wiki_vectors(settings.data_root.resolve(), rel)
     return FileContentResponse(layer=layer, path=rel, content=text, size=size)
 
 
@@ -142,6 +146,8 @@ async def put_file(
         body.content,
         settings.max_file_bytes,
     )
+    if layer == LayerName.wiki:
+        delete_wiki_vectors(settings.data_root.resolve(), path)
     return FileContentResponse(layer=layer, path=path, content=body.content, size=size)
 
 
@@ -158,6 +164,8 @@ async def delete_file(
         path,
         settings.forbid_delete_wiki_glob,
     )
+    if layer == LayerName.wiki:
+        delete_wiki_vectors(settings.data_root.resolve(), path.rstrip("/"))
     return {"ok": True, "deleted": path}
 
 

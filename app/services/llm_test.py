@@ -80,3 +80,68 @@ async def run_connection_test(
             message="",
             error=err or type(e).__name__,
         )
+
+
+async def run_connection_test_raw(
+    *,
+    model: str,
+    base_url: Optional[str],
+    timeout_seconds: float,
+    max_tokens: int,
+    api_key: Optional[str],
+    missing_key_error: str,
+    api_kind: str = "chat",
+) -> LLMTestResponse:
+    if not api_key:
+        return LLMTestResponse(
+            ok=False,
+            model=model,
+            base_url=base_url,
+            elapsed_ms=0.0,
+            message="",
+            error=missing_key_error,
+        )
+    kwargs: dict = {"api_key": api_key, "timeout": timeout_seconds}
+    if base_url:
+        kwargs["base_url"] = base_url
+    client = AsyncOpenAI(**kwargs)
+    t0 = time.perf_counter()
+    try:
+        usage_obj: Optional[object] = None
+        ok_message = "Chat Completions 调用成功"
+        if api_kind == "embedding":
+            emb = await client.embeddings.create(
+                model=model,
+                input=["ping"],
+            )
+            usage_obj = getattr(emb, "usage", None)
+            ok_message = "Embeddings 调用成功"
+        else:
+            completion = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=min(16, max_tokens),
+            )
+            usage_obj = completion.usage
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return LLMTestResponse(
+            ok=True,
+            model=model,
+            base_url=base_url,
+            elapsed_ms=round(elapsed_ms, 2),
+            message=ok_message,
+            usage=_usage(usage_obj),
+        )
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        err = str(e).strip()
+        if len(err) > 800:
+            err = err[:800] + "…"
+        return LLMTestResponse(
+            ok=False,
+            model=model,
+            base_url=base_url,
+            elapsed_ms=round(elapsed_ms, 2),
+            message="",
+            error=err or type(e).__name__,
+        )
