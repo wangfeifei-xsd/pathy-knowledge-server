@@ -174,7 +174,7 @@ class PolishTextResponse(BaseModel):
 
 
 class DialogueRecallBaseParams(BaseModel):
-    """wiki 关键词召回共用参数（与是否调用 LLM 无关）。"""
+    """wiki BM25 召回共用参数（与是否调用 LLM 无关）。"""
 
     query: str = Field(..., description="用户自然语言问句或指令")
     wiki_prefix: str = Field(
@@ -195,6 +195,18 @@ class DialogueRecallBaseParams(BaseModel):
         le=100_000,
         description="参考资料总字符上限（仅召回时亦为拼接预算；全流程时拼入用户消息）",
     )
+
+
+class RecallStopwordsUpdateRequest(BaseModel):
+    words: list[str] = Field(default_factory=list, description="停用词列表（将统一小写、去重）")
+
+
+class RecallStopwordsResponse(BaseModel):
+    words: list[str] = Field(default_factory=list)
+    source: str = Field(default="runtime_or_default", description="runtime_file 或 default_builtin")
+    runtime_path: str = Field(default=".pathy/recall_stopwords.txt")
+    count: int = 0
+    message: str = ""
 
 
 class DialogueRecallRequest(DialogueRecallBaseParams):
@@ -220,7 +232,7 @@ class DialogueRecallResponse(BaseModel):
     """仅召回阶段结果（无 LLM）。"""
 
     user_query: str
-    recall_method: str = Field(default="keyword_overlap", description="召回实现标识")
+    recall_method: str = Field(default="bm25", description="召回实现标识（当前为 bm25）")
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
@@ -236,7 +248,7 @@ class DialogueRecallTestResponse(BaseModel):
     model: str
     usage: Optional[TaskUsage] = None
     user_query: str
-    recall_method: str = Field(default="keyword_overlap", description="召回实现标识")
+    recall_method: str = Field(default="bm25", description="召回实现标识（当前为 bm25）")
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)

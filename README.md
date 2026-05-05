@@ -18,59 +18,54 @@ Karpathy 式知识库 **REST** 服务（MVP）：**原始层 raw / 编译层 wik
 
 **实现要点**：全部能力通过 **HTTP REST** 暴露；交互式 API 文档为 **OpenAPI 3 + Swagger UI**；持久化仅在 **`DATA_ROOT` 下本地文件系统** 内解析路径，禁止路径逃逸。
 
-## 对话召回（`keyword_overlap`）
+## 对话召回（`bm25`）
 
-自然语言问句在 **wiki 编译层** 上做片段召回，实现见 `app/services/dialogue_recall.py`。接口：`POST /api/v1/dialogue/recall`（仅召回）、`POST /api/v1/dialogue/recall-test`（召回后拼进用户消息再调 LLM）。**不写回 wiki 文件**。
+自然语言问句在 **wiki 编译层** 上做片段召回，实现见 `app/services/dialogue_recall.py`，停用词表见 `app/services/recall_stopwords.py`。接口：`POST /api/v1/dialogue/recall`（仅召回）、`POST /api/v1/dialogue/recall-test`（召回后拼进用户消息再调 LLM）。**不写回 wiki 文件**。
 
 ### 与「解析词条再匹配」的区别
 
-- **没有**向量嵌入、**没有**按 Markdown 标题/词条结构建索引。  
-- **没有**「先解析 wiki 词条列表再逐条比对」。  
-- 本质是：从**用户问句**抽出一组短字符串（terms），在 wiki 全文的**切块**上做**小写子串出现次数**加权求和，取分数最高的若干块，再按总字数预算截断，拼成 `injected_context`（参考资料正文）。
+- **没有**向量嵌入。  
+- **没有**「先建独立词条表再逐条比对」；但会按 **Markdown 标题层级** 将正文切成带 **标题路径**（如 `父 > 子`）的片段，并在该路径上为 query term 命中**额外加权**。  
+- 排序使用 **Okapi BM25**（在当次请求扫描到的所有片段上现算 **IDF**），比简单「子串出现次数求和」更抗常见词泛匹配。
 
 ### 处理步骤（与代码对应）
 
-1. **问句 → terms**（`_extract_query_terms`）  
-   正则切出中文连续段、英文数字连续段。英文数字段长度 ≥ 2 记为一个 term（小写）。中文：单字可成 term；长度 ≤ 8 的整段可成 term；更长中文再生成所有**相邻二字（bigram）**为 term，去重。
+1. **问句 → terms**（`_extract_query_terms` + `_filter_terms`）  
+   正则切出中文连续段、英文数字连续段。英文数字段长度 ≥ 2 记为一个 term（小写）。中文：**不**再使用单字 term；长度 ≤ 8 的整段可成 term；更长中文再生成**相邻二字（bigram）**。然后经 **停用词表** 过滤（`recall_stopwords.STOPWORDS`）。
 
 2. **读 wiki**（`_collect_wiki_pairs`）  
-   在请求参数 `wiki_prefix` 下扫描 `*.md`（或单文件），最多 `max_files` 篇，单文件受 `max_file_bytes` 限制。
+   在 `wiki_prefix` 下扫描 `*.md`（或单文件），最多 `max_files` 篇。
 
-3. **全文 → chunks**（`_split_chunks`）  
-   先按「三个及以上换行」分段；单段超过 `chunk_max_chars` 则按固定窗口滑切，窗口间有重叠，减轻截断句子中部的问题。
+3. **全文 → 片段**（`_wiki_indexed_chunks`）  
+   若文中存在 ATX 标题行（`#`…`######`），则按标题栈拆成多节，每节带 `heading_path`；节内过长仍用原 **滑窗**（`_split_chunks`）再切。若**无**标题，则整篇只走滑窗切块（`heading_path` 为空）。
 
-4. **chunk 打分**（`_score_text`）  
-   对每个 chunk 全文转小写，对每个 term 统计 `count`：单字符 term 权重 0.25，其余权重 1.0，**各项相加**为该 chunk 得分。得分 ≤ 0 的块丢弃。
+4. **BM25 打分**（`_score_chunks_bm25`）  
+   以「`heading_path` + 正文」拼成**匹配用全文**（小写子串计 **TF**），在当次语料上算各 term 的 **DF/IDF**，对每段求 **Okapi BM25**；若 term 还出现在 `heading_path` 中，按 **IDF 加一项标题奖励**（避免纯常见词在标题里刷分，与 TF 项共用 IDF 尺度）。
 
 5. **排序与截断**  
-   所有正分块按分数降序、同分按路径升序；只保留前 **`top_k_chunks`** 个块（默认 6，上限 32）。**并非**「所有有分的文件或块」都会进入结果。  
-   再将块格式化为 `### 相对路径\n\n片段`，按顺序拼接，总长不超过 **`context_budget_chars`**（默认 12000）；装不下的块丢弃，`context_truncated` 为真表示发生过预算截断。
+   正分片段按分数降序，只取前 **`top_k_chunks`**；再按 **`context_budget_chars`** 做块级截断。注入格式为 `### 文件相对路径` + 可选 `**标题路径**` + 正文。
 
 6. **输出**  
-   - `injected_context`：上述块用 `\n\n---\n\n` 连接；若无命中则为占位说明。  
-   - `recall_hits`：与最终进入 `injected_context` 的块一致（路径、分数、snippet 预览）。  
-   - `recall-test`：同一段 `injected_context` 作为「参考资料」写入发给模型的 **user** 消息，不修改磁盘上的 wiki。
+   - `recall_method` 字段为 `bm25`。  
+   - `query_terms` 为**过滤停用词之后**实际参与打分的词项。
 
 ### 流程图
 
 ```mermaid
 flowchart TD
   A[用户 query] --> B[_extract_query_terms]
-  B --> C[terms 列表]
+  B --> C[_filter_terms 停用词]
   D[wiki_prefix + max_files] --> E[_collect_wiki_pairs]
-  E --> F["(rel_path, full_markdown), ..."]
-  F --> G[每篇 full 调用 _split_chunks]
-  G --> H[chunks]
-  C --> I["_score_text(terms, chunk)"]
+  E --> F["每篇 markdown"]
+  F --> G["_wiki_indexed_chunks 标题切块或滑窗"]
+  G --> H[索引片段列表]
+  C --> I["_score_chunks_bm25"]
   H --> I
-  I --> J{score > 0?}
-  J -->|否| K[丢弃该 chunk]
-  J -->|是| L[加入 scored]
-  L --> M["排序: -score, rel"]
-  M --> N[取前 top_k_chunks]
-  N --> O["格式化: ### path + chunk"]
-  O --> P["_trim_context → context_budget_chars"]
-  P --> Q["injected_context + recall_hits"]
+  I --> J{BM25 > 0?}
+  J -->|否| K[丢弃]
+  J -->|是| L[排序取 top_k_chunks]
+  L --> M["格式化块 + _trim_context"]
+  M --> N["injected_context + recall_hits"]
 ```
 
 ### 时序图（仅召回 vs 带 LLM）
@@ -87,7 +82,7 @@ sequenceDiagram
   API->>Recall: query 与 wiki_prefix 等参数
   Recall->>FS: 列举并读取 .md
   FS-->>Recall: 多文件全文
-  Note over Recall: 抽 terms → 切块 → 计数打分 → top_k → 预算截断
+  Note over Recall: 抽词过滤 → 标题/滑窗切块 → BM25 topN → 预算截断
   Recall-->>API: injected_context, hits 等
 
   alt 仅 recall

@@ -1,4 +1,5 @@
 .venv/
+.venv-verify/
 __pycache__/
 *.py[cod]
 *$py.class

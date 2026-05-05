@@ -23,7 +23,7 @@ _OPENAPI_TAGS = [
     {"name": "LLM 任务", "description": "编译与 Lint 任务"},
     {
         "name": "对话召回",
-        "description": "自然语言 → wiki 召回 → 注入 LLM → 回答（测试流水线）",
+        "description": "自然语言 → wiki BM25 召回 → 注入 LLM → 回答（测试流水线）",
     },
 ]
 
