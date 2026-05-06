@@ -8,8 +8,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
-# API keys (never commit)
-data/.pathy/openai_api_key
+# Runtime knowledge base、向量索引与密钥文件（勿提交）
+data/
 .idea/
 *.egg-info/
 .eggs/
