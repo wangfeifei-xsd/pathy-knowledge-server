@@ -119,6 +119,19 @@ uvicorn app.main:app --host 0.0.0.0 --port 8765
 
 浏览器打开：`http://127.0.0.1:8765/docs`（Swagger）、`http://127.0.0.1:8765/health`。
 
+## Windows 本地部署（已验证）
+
+在 Windows 项目目录中，使用系统自带 PowerShell 执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-server.ps1 -Port 8766
+```
+
+启动后访问：
+
+- `http://127.0.0.1:8766/docs`
+- `http://127.0.0.1:8766/health`
+
 ## 重启服务
 
 服务是 **Uvicorn 单进程**，修改了环境变量、`.env`、依赖或代码后，需要**停掉旧进程再启动**新进程才会生效（`get_settings()` 等也会在重启后重新加载）。
