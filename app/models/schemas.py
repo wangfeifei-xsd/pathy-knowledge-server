@@ -18,13 +18,22 @@ class HealthResponse(BaseModel):
 class ConfigSummaryResponse(BaseModel):
     data_root: str
     data_root_resolved: str
-    openai_base_url_configured: bool
-    openai_model: str
-    openai_timeout_seconds: float = 120.0
-    openai_max_tokens: int = 8192
-    openai_api_key_configured: bool = False
+    llm_base_url: Optional[str] = Field(
+        default=None,
+        description="生效的 LLM OpenAI 兼容 Base URL；未配置则为 null（SDK 默认端点）",
+    )
+    llm_model: str = Field(description="生效的 LLM 模型 ID")
+    embedding_base_url: Optional[str] = Field(
+        default=None,
+        description="生效的 Embedding Base URL；未配置则为 null",
+    )
+    embedding_model: str = Field(description="生效的 Embedding 模型 ID")
+    rerank_base_url: Optional[str] = Field(
+        default=None,
+        description="生效的 Rerank Base URL；未配置则为 null",
+    )
+    rerank_model: str = Field(description="生效的 Rerank 模型 ID")
     layers: list[str] = Field(default_factory=lambda: ["raw", "wiki", "schema"])
-    auth_enabled: bool
 
 
 class LLMFieldSource(str, Enum):

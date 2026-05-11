@@ -17,7 +17,7 @@ _OPENAPI_TAGS = [
     {"name": "元数据", "description": "数据目录与配置摘要"},
     {
         "name": "模型配置",
-        "description": "LLM 配置：`GET`/`PUT` `/api/v1/settings/llm`；连通性 `POST` `/api/v1/settings/llm/test`（需 Bearer 若启用 API_KEY）",
+        "description": "LLM 配置：`GET`/`PUT` `/api/v1/settings/llm`；连通性 `POST` `/api/v1/settings/llm/test`",
     },
     {"name": "三层存储", "description": "raw / wiki / schema 列举与文件读写"},
     {"name": "LLM 任务", "description": "编译与 Lint 任务"},

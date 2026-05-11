@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import StreamingResponse
 
 from app.config import Settings, get_settings
-from app.deps import verify_api_key
 from app.models.schemas import (
     FileContentResponse,
     FileWriteRequest,
@@ -16,7 +15,7 @@ from app.models.schemas import (
 from app.services import storage
 from app.services.vector_index import delete_wiki_vectors, get_wiki_embedding_status_map
 
-router = APIRouter(prefix="/api/v1/layers", tags=["三层存储"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/api/v1/layers", tags=["三层存储"])
 
 
 def _decode_upload_text(raw: bytes) -> str:

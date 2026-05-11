@@ -1,6 +1,6 @@
 # pathy-knowledge-server
 
-Karpathy 式知识库 **REST** 服务：**原始层 raw / 编译层 wiki / 规范层 schema**，OpenAPI 3 + Swagger UI，可选 Bearer 鉴权，OpenAI 兼容 Chat Completions。
+Karpathy 式知识库 **REST** 服务：**原始层 raw / 编译层 wiki / 规范层 schema**，OpenAPI 3 + Swagger UI，OpenAI 兼容 Chat Completions。
 
 ## 项目简介
 
@@ -183,7 +183,6 @@ wiki 层支持单文件手动嵌入（用于向量召回），接口：`POST /ap
 | `RERANK_MODEL` | Rerank 模型 ID |
 | `RERANK_TIMEOUT` | Rerank 超时（秒） |
 | `RERANK_MAX_TOKENS` | Rerank max_tokens |
-| `API_KEY` | 若设置，则 `/api/*` 需 `Authorization: Bearer <token>` |
 | `CONFIG_FILE` | 可选 YAML 配置文件路径；同名字段可被环境变量覆盖 |
 
 ## 目录结构
@@ -209,4 +208,4 @@ wiki 层支持单文件手动嵌入（用于向量召回），接口：`POST /ap
 
 ## 安全说明
 
-生产环境建议启用 `API_KEY` 并置于 HTTPS 反向代理之后；所有文件路径在数据根内规范化解析，禁止 `../` 逃逸。
+服务假定部署在**可信内网**；若需对公网暴露，请在网关层自行做鉴权与 TLS。所有文件路径在数据根内规范化解析，禁止 `../` 逃逸。

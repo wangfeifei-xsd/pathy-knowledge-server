@@ -26,8 +26,6 @@ def main() -> int:
     (data_root / "wiki" / "demo_recall.md").write_text(wiki_body, encoding="utf-8")
 
     os.environ["DATA_ROOT"] = str(data_root)
-    # 不设 API_KEY：与本地开发一致，Bearer 可选
-    os.environ.pop("API_KEY", None)
 
     cwd = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(cwd))

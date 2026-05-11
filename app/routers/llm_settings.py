@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.config import Settings, get_settings
-from app.deps import verify_api_key
 from app.models.schemas import (
     BasicModelSettingsResponse,
     BasicModelSettingsUpdateRequest,
@@ -30,7 +29,7 @@ from app.services.llm_config import (
 )
 from app.services.llm_test import run_connection_test, run_connection_test_raw
 
-router = APIRouter(prefix="/api/v1", tags=["模型配置"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/api/v1", tags=["模型配置"])
 
 
 def _to_response(settings: Settings) -> LLMSettingsResponse:

@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends
 
 from app.config import Settings, get_settings
-from app.deps import verify_api_key
 from app.models.schemas import (
     CompileTaskRequest,
     CompileTaskResponse,
@@ -12,7 +11,7 @@ from app.models.schemas import (
 )
 from app.services import llm_tasks
 
-router = APIRouter(prefix="/api/v1/tasks", tags=["LLM 任务"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/api/v1/tasks", tags=["LLM 任务"])
 
 
 @router.post(

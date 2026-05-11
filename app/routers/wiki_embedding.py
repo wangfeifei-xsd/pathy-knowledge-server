@@ -1,11 +1,10 @@
 from fastapi import APIRouter, Depends
 
 from app.config import Settings, get_settings
-from app.deps import verify_api_key
 from app.models.schemas import WikiEmbedRequest, WikiEmbedResponse
 from app.services.vector_index import embed_wiki_file
 
-router = APIRouter(prefix="/api/v1/wiki", tags=["向量嵌入"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/api/v1/wiki", tags=["向量嵌入"])
 
 
 @router.post("/embed", response_model=WikiEmbedResponse, summary="手动嵌入单个 wiki 文件")

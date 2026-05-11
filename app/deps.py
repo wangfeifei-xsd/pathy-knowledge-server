@@ -1,16 +1,10 @@
 import logging
 import time
 import uuid
-from typing import Annotated, Optional
 
-from fastapi import Depends, HTTPException, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-from app.config import Settings, get_settings
+from fastapi import Request
 
 logger = logging.getLogger("pathy")
-
-security = HTTPBearer(auto_error=False)
 
 
 async def request_logging_middleware(request: Request, call_next):
@@ -29,15 +23,3 @@ async def request_logging_middleware(request: Request, call_next):
         elapsed_ms,
     )
     return response
-
-
-def verify_api_key(
-    settings: Annotated[Settings, Depends(get_settings)],
-    creds: Annotated[Optional[HTTPAuthorizationCredentials], Depends(security)],
-) -> None:
-    expected = settings.api_key
-    if not expected:
-        return
-    token = creds.credentials if creds and creds.scheme.lower() == "bearer" else None
-    if not token or token != expected:
-        raise HTTPException(status_code=401, detail="未授权或无效令牌")

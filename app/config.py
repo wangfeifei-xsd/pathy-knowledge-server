@@ -38,7 +38,6 @@ class Settings(BaseSettings):
     embedding_max_tokens: int = Field(default=8192, alias="EMBEDDING_MAX_TOKENS")
     rerank_max_tokens: int = Field(default=8192, alias="RERANK_MAX_TOKENS")
 
-    api_key: Optional[str] = Field(default=None, alias="API_KEY", description="若设置则启用 Bearer 鉴权")
     max_file_bytes: int = Field(default=2_097_152, description="单文件最大字节数（默认 2MB）")
     forbid_delete_wiki_glob: bool = Field(
         default=False,

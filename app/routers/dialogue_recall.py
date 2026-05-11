@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends
 
 from app.config import Settings, get_settings
-from app.deps import verify_api_key
 from app.models.schemas import (
     DialogueRecallRequest,
     DialogueRecallResponse,
@@ -19,11 +18,7 @@ from app.services.recall_stopwords import (
     write_runtime_stopwords,
 )
 
-router = APIRouter(
-    prefix="/api/v1/dialogue",
-    tags=["对话召回"],
-    dependencies=[Depends(verify_api_key)],
-)
+router = APIRouter(prefix="/api/v1/dialogue", tags=["对话召回"])
 
 
 @router.post(
