@@ -16,6 +16,7 @@ from app.config import Settings
 from app.models.schemas import (
     DialogueRecallBaseParams,
     DialogueRecallHit,
+    DialogueRecallLaneStatus,
     DialogueRecallRequest,
     DialogueRecallResponse,
     DialogueRecallTestRequest,
@@ -301,6 +302,8 @@ class WikiKeywordRecallArtifacts:
     query_terms: list[str]
     files_scanned: int
     recall_hits: list[DialogueRecallHit]
+    bm25: DialogueRecallLaneStatus
+    vector: DialogueRecallLaneStatus
     injected_context: str
     context_truncated: bool
 
@@ -310,15 +313,25 @@ async def _score_chunks_vector_with_model(
     query: str,
     wiki_prefix: str,
     top_n: int,
-) -> list[tuple[float, _IndexedChunk]]:
-    """模型向量召回：query embedding 后在已嵌入索引里做余弦检索。"""
+) -> tuple[list[tuple[float, _IndexedChunk]], DialogueRecallLaneStatus]:
+    """模型向量召回：query embedding 后在已嵌入索引里做余弦检索；同时返回该路状态。"""
     if not query.strip():
-        return []
+        return [], DialogueRecallLaneStatus(
+            status="skipped_empty_query",
+            candidate_count=0,
+            detail="问句为空，跳过向量召回",
+            embedding_model=None,
+        )
     em = compute_effective_embedding_model(settings)
     key = resolve_embedding_api_key(settings)
     if not key:
         logger.warning("dialogue_recall vector embedding_api_key_missing")
-        return []
+        return [], DialogueRecallLaneStatus(
+            status="skipped_no_api_key",
+            candidate_count=0,
+            detail="未配置 embedding API 密钥（EMBEDDING_API_KEY、服务端配置或数据目录 .pathy/embedding_api_key）",
+            embedding_model=em.model,
+        )
     kwargs: dict[str, object] = {"api_key": key, "timeout": em.timeout_seconds, "max_retries": 0}
     if em.base_url:
         kwargs["base_url"] = em.base_url
@@ -327,17 +340,31 @@ async def _score_chunks_vector_with_model(
         emb = await client.embeddings.create(model=em.model, input=[query])
     except Exception as e:
         logger.warning("dialogue_recall vector embedding_failed model=%s error=%s", em.model, str(e))
-        return []
+        err = str(e).strip()
+        if len(err) > 400:
+            err = err[:400] + "…"
+        return [], DialogueRecallLaneStatus(
+            status="error_embedding",
+            candidate_count=0,
+            detail=err or "embedding 请求失败",
+            embedding_model=em.model,
+        )
     qv = emb.data[0].embedding
     hits = search_wiki_vectors(settings, qv, wiki_prefix, top_n)
+    scored = [(h.score, _IndexedChunk(h.rel, h.heading_path, h.body)) for h in hits]
     logger.info(
         "dialogue_recall vector_done prefix=%s top_n=%d hits=%d model=%s",
         wiki_prefix or "/",
         top_n,
-        len(hits),
+        len(scored),
         em.model,
     )
-    return [(h.score, _IndexedChunk(h.rel, h.heading_path, h.body)) for h in hits]
+    return scored, DialogueRecallLaneStatus(
+        status="ok",
+        candidate_count=len(scored),
+        detail=None,
+        embedding_model=em.model,
+    )
 
 
 def _min_max_norm(v: float, lo: float, hi: float) -> float:
@@ -461,7 +488,36 @@ async def perform_wiki_keyword_recall(
         len(bm25_top),
     )
 
-    vector_scored = await _score_chunks_vector_with_model(
+    if not all_chunks:
+        bm25_lane = DialogueRecallLaneStatus(
+            status="skipped_no_chunks",
+            candidate_count=0,
+            detail="扫描范围内无可用 wiki 切片（无文件或正文为空）",
+            embedding_model=None,
+        )
+    elif not terms:
+        bm25_lane = DialogueRecallLaneStatus(
+            status="skipped_no_terms",
+            candidate_count=0,
+            detail="问句分词后无可用词项，或均被停用词过滤",
+            embedding_model=None,
+        )
+    elif not bm25_scored:
+        bm25_lane = DialogueRecallLaneStatus(
+            status="no_hits",
+            candidate_count=0,
+            detail="BM25 未产生正分匹配",
+            embedding_model=None,
+        )
+    else:
+        bm25_lane = DialogueRecallLaneStatus(
+            status="ok",
+            candidate_count=len(bm25_scored),
+            detail=None,
+            embedding_model=None,
+        )
+
+    vector_scored, vector_lane = await _score_chunks_vector_with_model(
         settings,
         q,
         prefix,
@@ -516,6 +572,8 @@ async def perform_wiki_keyword_recall(
         query_terms=terms,
         files_scanned=len(pairs),
         recall_hits=hits,
+        bm25=bm25_lane,
+        vector=vector_lane,
         injected_context=injected,
         context_truncated=ctx_truncated,
     )
@@ -533,6 +591,8 @@ async def run_dialogue_recall_only(settings: Settings, body: DialogueRecallReque
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,
+        bm25=art.bm25,
+        vector=art.vector,
         injected_context=art.injected_context,
         context_truncated=art.context_truncated,
         message="已完成 wiki 双路召回（BM25 + 向量）并 rerank（未调用 LLM）",
@@ -547,12 +607,19 @@ async def run_dialogue_recall_test(
     injected = art.injected_context
 
     system = (body.system_prompt or "").strip() or (
-        "你是知识库问答助手。用户会提供「参考资料」片段（来自本地 wiki 编译层 BM25 + 向量双路召回并 rerank）。\n"
-        "请优先依据参考资料作答；若资料中没有相关信息，请明确说明「知识库中未找到依据」，不要编造事实。"
+        "你是一位资深海水鱼健康管理与疾病防控顾问，代号「检疫神克隆体」。\n"
+        "用户消息中会附带从本地 wiki 编译层经 BM25 + 向量双路召回并 rerank 得到的「知识库召回片段」；片段可能不完整、顺序打散或含轻微噪声。\n"
+        "\n"
+        "【作答原则】\n"
+        "1. 以召回片段为首要依据：能引用处请把机制讲清楚（生理、药理、水质、病原体与鱼体状态如何勾连），语气专业、笃定而克制；在科学前提下可适当用比喻或现场感描写，让解释好读、好记，避免干巴巴的关键词堆砌。\n"
+        "2. 证据不足或关键参数缺失（如药物浓度、药浴时长、水温、曝气、换水节奏等）时，须明确写出「在现有资料下只能判断到…」「尚需…才能定论」，不得编造数据或虚构文献。\n"
+        "3. 当片段与问题明显无关、或无法从中提炼有效依据时，须明确写出「知识库中未找到依据」；若给出一两句常识性提醒，须标注为常识推断而非库内结论。\n"
+        "4. 若存在多轮对话，请把用户后续补充与先前描述一并纳入，形成一条连贯的分析链，并在末段收束到用户当下最关心的结论或行动建议。\n"
+        "5. 结构建议：可用小标题、短列表或表格组织信息；优先给可操作的检疫/治疗/观察要点，少用空话套话。"
     )
     user_msg = (
-        f"用户问题：\n{art.user_query}\n\n"
-        f"---\n\n参考资料（可能不完整）：\n\n{injected}"
+        f"【待答问题】\n{art.user_query}\n\n"
+        f"---\n【知识库召回片段】\n（经检索与合并，可能截断；请严格据此并结合对话上文作答）\n\n{injected}"
     )
 
     client, eff = _build_openai_client(settings)
@@ -584,6 +651,8 @@ async def run_dialogue_recall_test(
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,
+        bm25=art.bm25,
+        vector=art.vector,
         injected_context=injected,
         context_truncated=art.context_truncated,
         assistant_reply=reply,

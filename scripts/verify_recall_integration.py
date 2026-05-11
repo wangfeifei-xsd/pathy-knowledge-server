@@ -65,6 +65,10 @@ def main() -> int:
     assert "顶层概述" in ctx or "召回机制" in ctx, ctx[:800]
     hits = body.get("recall_hits") or []
     assert len(hits) >= 1, hits
+    bm25 = body.get("bm25") or {}
+    vec = body.get("vector") or {}
+    assert bm25.get("status") == "ok", bm25
+    assert vec.get("status") in ("ok", "skipped_no_api_key", "error_embedding"), vec
 
     # polish-text 路由存在且无 404（无密钥时为 503）
     p = client.post("/api/v1/tasks/polish-text", json={"content": "hello world test"})

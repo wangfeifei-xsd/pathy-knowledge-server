@@ -273,6 +273,31 @@ class DialogueRecallHit(BaseModel):
     snippet: str = Field(description="片段预览")
 
 
+class DialogueRecallLaneStatus(BaseModel):
+    """单路召回（BM25 或向量）的参与状态；均为服务端已计算信息，无额外 IO。"""
+
+    status: str = Field(
+        description=(
+            "BM25: ok | skipped_no_chunks | skipped_no_terms | no_hits。"
+            "向量: ok | skipped_no_api_key | error_embedding。"
+            "含义见各接口文档或服务端日志。"
+        )
+    )
+    candidate_count: int = Field(
+        default=0,
+        ge=0,
+        description="该路产生的候选条数（BM25 为得分>0 的切片数；向量为 embedding 成功后检索返回条数）",
+    )
+    detail: Optional[str] = Field(
+        default=None,
+        description="补充说明，如停用词/无切片原因或 embedding 错误摘要",
+    )
+    embedding_model: Optional[str] = Field(
+        default=None,
+        description="向量路拟使用的 embedding 模型 id；BM25 路为 null",
+    )
+
+
 class DialogueRecallResponse(BaseModel):
     """仅召回阶段结果（无 LLM）。"""
 
@@ -281,6 +306,8 @@ class DialogueRecallResponse(BaseModel):
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
+    bm25: DialogueRecallLaneStatus = Field(description="BM25 一路状态")
+    vector: DialogueRecallLaneStatus = Field(description="向量一路状态")
     injected_context: str = Field(description="按预算拼接后的参考资料正文（与全流程注入块一致）")
     context_truncated: bool = Field(
         default=False,
@@ -297,6 +324,8 @@ class DialogueRecallTestResponse(BaseModel):
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
+    bm25: DialogueRecallLaneStatus = Field(description="BM25 一路状态")
+    vector: DialogueRecallLaneStatus = Field(description="向量一路状态")
     injected_context: str = Field(description="实际拼入用户消息的参考资料正文")
     context_truncated: bool = Field(
         default=False,

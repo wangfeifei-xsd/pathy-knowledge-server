@@ -119,6 +119,20 @@ def _parse_md_sections(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _is_meaningful_body(body: str) -> bool:
+    """与 dialogue_recall._is_meaningful_body 等价：判断 section 是否有实质内容。
+
+    去掉空白、`---`/`___`/`***`/`===` 等分隔符与孤立标点后仍非空即为有意义。
+    """
+    if not body:
+        return False
+    s = body.strip()
+    if not s:
+        return False
+    cleaned = re.sub(r"[\s\-_*=]+", "", s)
+    return bool(cleaned)
+
+
 def _wiki_chunks(rel: str, full: str, max_chars: int) -> list[tuple[str, str, str]]:
     full = (full or "").replace("\r\n", "\n")
     if not full.strip():
@@ -126,6 +140,10 @@ def _wiki_chunks(rel: str, full: str, max_chars: int) -> list[tuple[str, str, st
     out: list[tuple[str, str, str]] = []
     if _markdown_heading_present(full):
         for path, body in _parse_md_sections(full):
+            # 过滤"只有标题没有正文"以及"全为分隔符"的 section，与召回侧行为对齐，
+            # 避免把无意义片段写进向量索引（既浪费 embedding API 调用，也污染召回）。
+            if not _is_meaningful_body(body):
+                continue
             if len(body) <= max_chars:
                 out.append((rel, path, body))
             else:
