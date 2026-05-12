@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.deps import request_logging_middleware
-from app.routers import dialogue_recall, health, layers, llm_settings, meta, tasks, wiki_embedding
+from app.routers import dialogue_recall, health, layers, data_structure, llm_settings, meta, tasks, wiki_embedding
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,6 +20,7 @@ _OPENAPI_TAGS = [
         "description": "LLM 配置：`GET`/`PUT` `/api/v1/settings/llm`；连通性 `POST` `/api/v1/settings/llm/test`",
     },
     {"name": "三层存储", "description": "raw / wiki / schema 列举与文件读写"},
+    {"name": "存储结构", "description": "data 下各层目录树查询；层根下单层子目录新增；空目录重命名与删除"},
     {"name": "LLM 任务", "description": "编译与 Lint 任务"},
     {
         "name": "对话召回",
@@ -51,6 +52,7 @@ app.include_router(health.router)
 app.include_router(meta.router)
 app.include_router(llm_settings.router)
 app.include_router(layers.router)
+app.include_router(data_structure.router)
 app.include_router(tasks.router)
 app.include_router(dialogue_recall.router)
 app.include_router(wiki_embedding.router)

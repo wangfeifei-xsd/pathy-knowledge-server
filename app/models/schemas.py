@@ -342,3 +342,31 @@ class DialogueRecallTestResponse(BaseModel):
     )
     assistant_reply: str
     message: str = ""
+
+
+class DataFolderTreeNode(BaseModel):
+    """单层或多层子目录树节点；path 为相对该层的目录前缀（层根为 ''，子目录以 / 结尾）。"""
+
+    path: str = Field(description="相对层根：'' 表示层根；否则 posix 且以 / 结尾，如 reef/")
+    title: str
+    children: list["DataFolderTreeNode"] = Field(default_factory=list)
+
+
+class DataStructureFolderCreateRequest(BaseModel):
+    layer: LayerName
+    name: str = Field(..., description="仅在层根下创建的单段目录名，例如 reef → raw/reef/")
+
+
+class DataStructureFolderRenameRequest(BaseModel):
+    layer: LayerName
+    path: str = Field(..., description="要重命名的目录相对路径，如 reef/ 或 reef")
+    new_name: str = Field(..., description="新目录名单段")
+
+
+class DataStructureFolderOpResponse(BaseModel):
+    ok: bool = True
+    layer: LayerName
+    path: str = Field(description="创建或重命名后的目录相对前缀（以 / 结尾）；删除时为被删路径")
+
+
+DataFolderTreeNode.model_rebuild()
