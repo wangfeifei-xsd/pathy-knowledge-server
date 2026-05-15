@@ -8,6 +8,7 @@ class LayerName(str, Enum):
     raw = "raw"
     wiki = "wiki"
     schema = "schema"
+    media = "media"
 
 
 class HealthResponse(BaseModel):
@@ -33,7 +34,10 @@ class ConfigSummaryResponse(BaseModel):
         description="生效的 Rerank Base URL；未配置则为 null",
     )
     rerank_model: str = Field(description="生效的 Rerank 模型 ID")
-    layers: list[str] = Field(default_factory=lambda: ["raw", "wiki", "schema"])
+    layers: list[str] = Field(
+        default_factory=lambda: ["raw", "wiki", "schema", "media"],
+        description="逻辑层：media 为本地多媒体目录（见 /api/v1/media），不走 layers 文本读写接口",
+    )
 
 
 class LLMFieldSource(str, Enum):
@@ -251,6 +255,92 @@ class RecallStopwordsResponse(BaseModel):
     message: str = ""
 
 
+class MediaRef(BaseModel):
+    """召回或索引中引用的媒体摘要（客户端再 GET /api/v1/media/{code}）。"""
+
+    code: str
+    mime: str = Field(description="Content-Type 主类型")
+    title: Optional[str] = Field(default=None, description="可选标题")
+    size: int = Field(default=0, ge=0, description="字节数")
+
+
+class MediaBackrefEntry(BaseModel):
+    wiki_path: str = Field(description="wiki 相对路径（.md）")
+    heading_path: str = Field(default="", description="标题路径，无标题则为空")
+
+
+class MediaUploadResponse(BaseModel):
+    code: str
+    deduplicated: bool = Field(default=False, description="是否因 sha256 已存在而返回已有条目")
+    mime: str
+    size: int
+    message: str = ""
+
+
+class MediaReindexBackrefsResponse(BaseModel):
+    codes_with_refs: int = Field(description="至少出现一次的 media code 数")
+    total_ref_rows: int = Field(description="去重后的 (code, wiki, heading) 条数")
+    message: str = ""
+
+
+class MediaBackrefsResponse(BaseModel):
+    code: str
+    entries: list[MediaBackrefEntry] = Field(default_factory=list)
+    message: str = Field(
+        default="",
+        description="若 entries 为空，可能尚未运行 POST /api/v1/media/reindex-backrefs",
+    )
+
+
+class MediaListItem(BaseModel):
+    """manifest 中单条媒体（供控制台列表，不含磁盘 rel_storage）。"""
+
+    code: str
+    mime: str = ""
+    size: int = Field(default=0, ge=0)
+    title: Optional[str] = None
+    original_name: Optional[str] = None
+    created_at: str = Field(default="", description="ISO 时间")
+    sha256: str = Field(default="", description="内容哈希")
+
+
+class MediaListResponse(BaseModel):
+    items: list[MediaListItem] = Field(default_factory=list)
+    count: int = Field(default=0, ge=0, description="条目数")
+    bytes_total: int = Field(default=0, ge=0, description="登记字节合计")
+
+
+class MediaResolveFromTextRequest(BaseModel):
+    text: str = Field(
+        default="",
+        max_length=500_000,
+        description="任意正文（多为召回 injected_context 纯文本，或含 wiki 的 Markdown）；解析 ![[MEDIA:…]] 与 <!-- media:… -->",
+    )
+    codes: list[str] = Field(
+        default_factory=list,
+        description="额外 code（如召回 merged_media 中的 code），与正文解析结果按序合并去重",
+    )
+
+
+class MediaResolvedItem(BaseModel):
+    code: str
+    registered: bool = Field(description="manifest 中是否已登记该 code")
+    mime: str = ""
+    size: int = Field(default=0, ge=0)
+    title: Optional[str] = None
+    original_name: Optional[str] = None
+    created_at: str = ""
+    sha256: str = ""
+
+
+class MediaResolveFromTextResponse(BaseModel):
+    codes: list[str] = Field(default_factory=list, description="合并去重后的 code 顺序")
+    items: list[MediaResolvedItem] = Field(
+        default_factory=list,
+        description="与 codes 一一对应；registered=false 表示正文提及但未在 manifest 登记",
+    )
+
+
 class WikiEmbedRequest(BaseModel):
     path: str = Field(description="wiki 相对路径，仅支持 .md 文件")
 
@@ -280,6 +370,10 @@ class DialogueRecallHit(BaseModel):
     path: str = Field(description="wiki 相对路径")
     score: float = Field(description="融合重排得分（BM25 + 向量 + 轻量规则，越大越相关）")
     snippet: str = Field(description="片段预览")
+    heading_path: str = Field(
+        default="",
+        description="该片段在文内的 Markdown 标题路径（父 > 子）；无标题切块时为空",
+    )
 
 
 class DialogueRecallLaneStatus(BaseModel):
@@ -315,9 +409,15 @@ class DialogueRecallResponse(BaseModel):
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
+    merged_media: list[MediaRef] = Field(
+        default_factory=list,
+        description="各命中片段正文内解析出的媒体，按命中顺序合并后按 code 去重（不再逐条挂在 recall_hits 上）",
+    )
     bm25: DialogueRecallLaneStatus = Field(description="BM25 一路状态")
     vector: DialogueRecallLaneStatus = Field(description="向量一路状态")
-    injected_context: str = Field(description="按预算拼接后的参考资料正文（与全流程注入块一致）")
+    injected_context: str = Field(
+        description="按预算拼接后的纯文本参考资料（不含多媒体占位与媒体 code；媒体见 merged_media）",
+    )
     context_truncated: bool = Field(
         default=False,
         description="是否因 context_budget_chars 截断了部分片段",
@@ -333,9 +433,15 @@ class DialogueRecallTestResponse(BaseModel):
     query_terms: list[str] = Field(default_factory=list, description="从问句解析出的匹配词条")
     files_scanned: int = Field(default=0, description="实际扫描的 wiki 文件数")
     recall_hits: list[DialogueRecallHit] = Field(default_factory=list)
+    merged_media: list[MediaRef] = Field(
+        default_factory=list,
+        description="各命中片段正文内解析出的媒体，按命中顺序合并后按 code 去重（不再逐条挂在 recall_hits 上）",
+    )
     bm25: DialogueRecallLaneStatus = Field(description="BM25 一路状态")
     vector: DialogueRecallLaneStatus = Field(description="向量一路状态")
-    injected_context: str = Field(description="实际拼入用户消息的参考资料正文")
+    injected_context: str = Field(
+        description="实际拼入用户消息的纯文本参考资料（不含多媒体占位与媒体 code；媒体见 merged_media）",
+    )
     context_truncated: bool = Field(
         default=False,
         description="是否因 context_budget_chars 截断了部分片段",

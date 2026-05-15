@@ -22,6 +22,7 @@ from app.models.schemas import (
     DialogueRecallTestRequest,
     DialogueRecallTestResponse,
     LayerName,
+    MediaRef,
     TaskUsage,
 )
 from app.services import storage
@@ -33,6 +34,8 @@ from app.services.llm_tasks import (
 )
 from app.services.llm_config import compute_effective_embedding_model, resolve_embedding_api_key
 from app.services.recall_stopwords import read_effective_stopwords
+from app.services.media_codes import extract_media_codes, strip_media_tags
+from app.services.media_store import enrich_codes_to_refs
 from app.services.vector_index import search_wiki_vectors
 
 _re_word = re.compile(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+")
@@ -245,6 +248,7 @@ def _score_chunks_bm25(chunks: list[_IndexedChunk], terms: list[str]) -> list[tu
 
 
 def _format_injected_block(rel: str, heading_path: str, body: str) -> str:
+    """拼接注入 LLM 的单块正文：仅路径/标题/纯文本，不含任何媒体占位或 code 说明。"""
     b = (body or "").strip()
     if heading_path:
         return f"### {rel}\n\n**{heading_path}**\n\n{b}"
@@ -296,12 +300,26 @@ RECALL_METHOD_BM25 = "bm25"
 RECALL_METHOD_HYBRID = "hybrid_bm25_vector"
 
 
+def _merge_per_hit_media_lists(per_hit: list[list[MediaRef]]) -> list[MediaRef]:
+    """按命中顺序展平各片段的 media，再按 code 去重。"""
+    seen: set[str] = set()
+    out: list[MediaRef] = []
+    for group in per_hit:
+        for m in group:
+            if m.code in seen:
+                continue
+            seen.add(m.code)
+            out.append(m)
+    return out
+
+
 @dataclass(frozen=True)
 class WikiKeywordRecallArtifacts:
     user_query: str
     query_terms: list[str]
     files_scanned: int
     recall_hits: list[DialogueRecallHit]
+    merged_media: list[MediaRef]
     bm25: DialogueRecallLaneStatus
     vector: DialogueRecallLaneStatus
     injected_context: str
@@ -544,19 +562,32 @@ async def perform_wiki_keyword_recall(
     for item in top:
         ch = item.chunk
         candidates.append((item.rerank_score, ch.rel, ch.heading_path, ch.body))
-        block_lines.append(_format_injected_block(ch.rel, ch.heading_path, ch.body))
+        body_for_llm = strip_media_tags(ch.body)
+        block_lines.append(_format_injected_block(ch.rel, ch.heading_path, body_for_llm))
 
     blocks, ctx_truncated = _trim_context(block_lines, body.context_budget_chars)
     kept_n = len(blocks)
     hits: list[DialogueRecallHit] = []
+    per_hit_media: list[list[MediaRef]] = []
     for sc, rel, hpath, chunk_body in candidates[:kept_n]:
         snip = (chunk_body or "").replace("\r\n", "\n").strip()
         if hpath:
             snip = f"{hpath}\n{snip}".strip()
+        snip = strip_media_tags(snip)
         if len(snip) > 320:
             snip = snip[:320] + "…"
-        hits.append(DialogueRecallHit(path=rel, score=round(sc, 6), snippet=snip))
+        mrefs = enrich_codes_to_refs(data_root, extract_media_codes(chunk_body))
+        per_hit_media.append(mrefs)
+        hits.append(
+            DialogueRecallHit(
+                path=rel,
+                score=round(sc, 6),
+                snippet=snip,
+                heading_path=hpath or "",
+            )
+        )
 
+    merged_media = _merge_per_hit_media_lists(per_hit_media)
     injected = "\n\n---\n\n".join(blocks) if blocks else empty_injected_text
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     logger.info(
@@ -572,6 +603,7 @@ async def perform_wiki_keyword_recall(
         query_terms=terms,
         files_scanned=len(pairs),
         recall_hits=hits,
+        merged_media=merged_media,
         bm25=bm25_lane,
         vector=vector_lane,
         injected_context=injected,
@@ -591,6 +623,7 @@ async def run_dialogue_recall_only(settings: Settings, body: DialogueRecallReque
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,
+        merged_media=art.merged_media,
         bm25=art.bm25,
         vector=art.vector,
         injected_context=art.injected_context,
@@ -608,7 +641,7 @@ async def run_dialogue_recall_test(
 
     system = (body.system_prompt or "").strip() or (
         "你是一位资深海水鱼健康管理与疾病防控顾问，代号「检疫神克隆体」。\n"
-        "用户消息中会附带从本地 wiki 编译层经 BM25 + 向量双路召回并 rerank 得到的「知识库召回片段」；片段可能不完整、顺序打散或含轻微噪声。\n"
+        "用户消息中会附带从本地 wiki 编译层经 BM25 + 向量双路召回并 rerank 得到的「知识库召回片段」；片段为纯文字摘录，可能不完整、顺序打散或含轻微噪声。\n"
         "\n"
         "【作答原则】\n"
         "1. 以召回片段为首要依据：能引用处请把机制讲清楚（生理、药理、水质、病原体与鱼体状态如何勾连），语气专业、笃定而克制；在科学前提下可适当用比喻或现场感描写，让解释好读、好记，避免干巴巴的关键词堆砌。\n"
@@ -651,6 +684,7 @@ async def run_dialogue_recall_test(
         query_terms=art.query_terms,
         files_scanned=art.files_scanned,
         recall_hits=art.recall_hits,
+        merged_media=art.merged_media,
         bm25=art.bm25,
         vector=art.vector,
         injected_context=injected,

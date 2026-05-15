@@ -27,5 +27,5 @@ async def config_summary(settings: Settings = Depends(get_settings)) -> ConfigSu
         embedding_model=eff_emb.model,
         rerank_base_url=eff_rr.base_url,
         rerank_model=eff_rr.model,
-        layers=["raw", "wiki", "schema"],
+        layers=["raw", "wiki", "schema", "media"],
     )

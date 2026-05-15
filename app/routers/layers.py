@@ -17,6 +17,11 @@ from app.services.vector_index import delete_wiki_vectors, get_wiki_embedding_st
 
 router = APIRouter(prefix="/api/v1/layers", tags=["三层存储"])
 
+_MEDIA_LAYER_FILE_MSG = (
+    "media 层为二进制与 manifest，请使用 /api/v1/media 相关接口（上传、按 code 下载、列表）；"
+    "本页仅可「列举目录」与打包下载 ZIP。"
+)
+
 
 def _decode_upload_text(raw: bytes) -> str:
     """按 UTF-8（含 BOM）优先；失败则尝试 GB18030（常见的中文 Windows 记事本保存）。"""
@@ -84,6 +89,8 @@ async def read_file(
     path: str = Query(..., description="层内相对文件路径"),
     settings: Settings = Depends(get_settings),
 ) -> FileContentResponse:
+    if layer == LayerName.media:
+        raise HTTPException(status_code=400, detail=_MEDIA_LAYER_FILE_MSG)
     storage.ensure_layer_tree(settings.data_root.resolve())
     text, size = storage.read_file(settings.data_root.resolve(), layer, path, settings.max_file_bytes)
     return FileContentResponse(layer=layer, path=path, content=text, size=size)
@@ -103,6 +110,8 @@ async def upload_file(
     ),
     settings: Settings = Depends(get_settings),
 ) -> FileContentResponse:
+    if layer == LayerName.media:
+        raise HTTPException(status_code=400, detail=_MEDIA_LAYER_FILE_MSG)
     storage.ensure_layer_tree(settings.data_root.resolve())
     raw = await file.read()
     if len(raw) > settings.max_file_bytes:
@@ -137,6 +146,8 @@ async def put_file(
     path: str = Query(..., description="层内相对文件路径"),
     settings: Settings = Depends(get_settings),
 ) -> FileContentResponse:
+    if layer == LayerName.media:
+        raise HTTPException(status_code=400, detail=_MEDIA_LAYER_FILE_MSG)
     storage.ensure_layer_tree(settings.data_root.resolve())
     size = storage.write_file(
         settings.data_root.resolve(),
@@ -156,6 +167,8 @@ async def delete_file(
     path: str = Query(..., description="层内相对路径"),
     settings: Settings = Depends(get_settings),
 ) -> dict:
+    if layer == LayerName.media:
+        raise HTTPException(status_code=400, detail=_MEDIA_LAYER_FILE_MSG)
     storage.ensure_layer_tree(settings.data_root.resolve())
     storage.delete_path(
         settings.data_root.resolve(),

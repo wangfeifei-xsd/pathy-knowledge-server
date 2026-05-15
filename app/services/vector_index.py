@@ -16,6 +16,7 @@ from app.config import Settings
 from app.models.schemas import LayerName
 from app.services import storage
 from app.services.llm_config import compute_effective_embedding_model, resolve_embedding_api_key
+from app.services.media_codes import extract_media_codes
 
 INDEX_FILE = "wiki_embedding_index.json"
 _HEADING_LINE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -292,6 +293,7 @@ async def embed_wiki_file(settings: Settings, rel_path: str) -> tuple[int, str, 
             "path": rel,
             "heading_path": c[1],
             "body": c[2],
+            "media_codes": extract_media_codes(c[2]),
             "updated_at": _now_iso(),
             "vector": emb.data[i].embedding,
         }

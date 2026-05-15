@@ -39,6 +39,23 @@ class Settings(BaseSettings):
     rerank_max_tokens: int = Field(default=8192, alias="RERANK_MAX_TOKENS")
 
     max_file_bytes: int = Field(default=2_097_152, description="单文件最大字节数（默认 2MB）")
+    media_max_upload_bytes: int = Field(
+        default=52_428_800,
+        alias="MEDIA_MAX_UPLOAD_BYTES",
+        description="单媒体上传最大字节（默认 50MB）",
+    )
+    media_total_quota_bytes: int = Field(
+        default=2_147_483_648,
+        alias="MEDIA_TOTAL_QUOTA_BYTES",
+        description="媒体层总占用上限（默认 2GB，仅统计 manifest 内登记大小）",
+    )
+    media_reindex_max_files: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        alias="MEDIA_REINDEX_MAX_FILES",
+        description="重建媒体反向索引时最多扫描的 wiki .md 文件数",
+    )
     forbid_delete_wiki_glob: bool = Field(
         default=False,
         description="若为 True，禁止删除 wiki 层任意路径（只读编译层）",
