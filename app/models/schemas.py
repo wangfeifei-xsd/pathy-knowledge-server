@@ -341,6 +341,33 @@ class MediaResolveFromTextResponse(BaseModel):
     )
 
 
+class MediaExportZipRequest(BaseModel):
+    codes: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="要导出的 media code 列表（多选）；会去重并校验",
+    )
+
+
+class MediaImportZipRow(BaseModel):
+    source_code: str = Field(description="zip 内的导出 code")
+    result_code: str = Field(default="", description="导入后在当前环境的 code（去重或冲突映射时可能与 source 不同）")
+    status: str = Field(
+        description="imported / remapped / skipped_identical / deduplicated_existing / error",
+    )
+    detail: str = Field(default="", description="说明或错误原因")
+
+
+class MediaImportZipResponse(BaseModel):
+    results: list[MediaImportZipRow] = Field(default_factory=list)
+    message: str = Field(default="", description="汇总说明")
+    target_dir_normalized: str = Field(
+        default="",
+        description="实际写入的 media/objects 子目录（空为默认分层路径）",
+    )
+
+
 class WikiEmbedRequest(BaseModel):
     path: str = Field(description="wiki 相对路径，仅支持 .md 文件")
 

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.config import Settings, get_settings
 from app.models.schemas import (
     MediaBackrefsResponse,
+    MediaExportZipRequest,
+    MediaImportZipResponse,
+    MediaImportZipRow,
     MediaListItem,
     MediaListResponse,
     MediaReindexBackrefsResponse,
@@ -19,12 +23,15 @@ from app.models.schemas import (
 )
 from app.services.media_codes import merge_extracted_and_extra_codes
 from app.services.media_store import (
+    build_media_export_zip_bytes,
     ensure_media_tree,
     get_backrefs_for_code,
     get_media_file_path,
     get_media_item,
+    import_media_zip,
     list_manifest_items,
     list_media_manifest_summary,
+    normalize_media_objects_subdir,
     reindex_media_backrefs,
     register_upload,
     resolve_media_codes_metadata,
@@ -99,6 +106,72 @@ def get_media_items(settings: Settings = Depends(get_settings)) -> MediaListResp
     rows, n, total = list_manifest_items(data_root)
     items = [MediaListItem.model_validate(r) for r in rows]
     return MediaListResponse(items=items, count=n, bytes_total=total)
+
+
+@router.post(
+    "/export-zip",
+    summary="多选导出为 ZIP",
+    description=(
+        "请求体提供 codes；返回 application/zip，内含 pathy_media_export.json（manifest 全量字段 + wiki 反向引用）"
+        " 与各资源二进制（与 manifest.rel_storage 一致的相对路径）。"
+    ),
+    response_class=Response,
+)
+def post_export_media_zip(
+    body: MediaExportZipRequest,
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    data_root = settings.data_root.resolve()
+    fname, data = build_media_export_zip_bytes(data_root, body.codes)
+    ascii_fallback = fname.encode("ascii", "replace").decode("ascii")
+    disp = (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quote(fname)}"
+    )
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": disp},
+    )
+
+
+@router.post(
+    "/import-zip",
+    response_model=MediaImportZipResponse,
+    summary="从导出 ZIP 导入",
+    description=(
+        "multipart：file 为本服务导出的 zip；target_dir 为可选的 media/objects 下子目录（如 project/handbook），"
+        "用于归类落盘路径；留空则与上传默认一致为 objects/ab/cd/…。"
+        "若 code 冲突且内容不同将分配新 code；内容去重则合并到已有 code。"
+        "导出包中的 backrefs 会尝试合并进 .pathy/media_backrefs.json。"
+    ),
+)
+async def post_import_media_zip(
+    file: UploadFile = File(..., description="pathy 导出的多媒体 zip"),
+    target_dir: str = Form("", description="media/objects 下子目录，段间用 /"),
+    settings: Settings = Depends(get_settings),
+) -> MediaImportZipResponse:
+    data_root = settings.data_root.resolve()
+    sub_norm = normalize_media_objects_subdir(target_dir)
+    raw = await file.read()
+    max_zip = max(
+        settings.media_max_upload_bytes * 200,
+        min(settings.media_total_quota_bytes, 2_147_483_648),
+    )
+    rows_raw, msg = import_media_zip(
+        data_root,
+        raw,
+        sub_norm,
+        max_upload_bytes=settings.media_max_upload_bytes,
+        total_quota_bytes=settings.media_total_quota_bytes,
+        max_zip_bytes=max_zip,
+    )
+    rows = [MediaImportZipRow.model_validate(r) for r in rows_raw]
+    return MediaImportZipResponse(
+        results=rows,
+        message=msg,
+        target_dir_normalized=sub_norm,
+    )
 
 
 @router.post(

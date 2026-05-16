@@ -28,7 +28,7 @@ _OPENAPI_TAGS = [
     },
     {
         "name": "多媒体",
-        "description": "图片/视频上传与按 code 下载；wiki 占位符关联与反向索引（reindex-backrefs）",
+        "description": "图片/视频上传与按 code 下载；多选 ZIP 导出/导入；wiki 占位符关联与反向索引（reindex-backrefs）",
     },
 ]
 

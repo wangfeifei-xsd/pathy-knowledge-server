@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import re
 import secrets
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -18,6 +21,8 @@ from app.services.media_codes import extract_media_codes
 MANIFEST_NAME = "manifest.json"
 OBJECTS_DIR = "objects"
 BACKREFS_FILE = "media_backrefs.json"
+EXPORT_JSON_NAME = "pathy_media_export.json"
+_SUBDIR_SEG = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 # 扩展名（小写）→ 用于校验；MIME 优先用上传声明，否则由此映射
 _EXT_WHITELIST: dict[str, str] = {
@@ -114,11 +119,32 @@ def resolve_mime(ext: str, upload_content_type: Optional[str]) -> str:
     return ct
 
 
-def _object_rel_path(code: str, ext_with_dot: str) -> str:
-    # objects/ab/cd/{code}.ext
+def normalize_media_objects_subdir(raw: str) -> str:
+    """media/objects 下的可选子路径，如 batch2024/handbook；空表示默认 objects/ab/cd/…"""
+    s = (raw or "").strip().replace("\\", "/").strip("/")
+    if not s:
+        return ""
+    parts = [p for p in s.split("/") if p and p != "."]
+    if len(parts) > 24:
+        raise HTTPException(status_code=400, detail="target_dir 层级过多（最多 24 段）")
+    for p in parts:
+        if p == "..":
+            raise HTTPException(status_code=400, detail="target_dir 不允许包含 '..'")
+        if not _SUBDIR_SEG.match(p):
+            raise HTTPException(
+                status_code=400,
+                detail="target_dir 每段仅允许字母、数字、下划线、连字符，且非空",
+            )
+    return "/".join(parts)
+
+
+def _object_rel_path(code: str, ext_with_dot: str, *, objects_subdir: str = "") -> str:
     a, b = code[:2], code[2:4] if len(code) > 2 else "xx"
     safe_ext = ext_with_dot if ext_with_dot.startswith(".") else f".{ext_with_dot}"
-    return f"{OBJECTS_DIR}/{a}/{b}/{code}{safe_ext}"
+    tail = f"{a}/{b}/{code}{safe_ext}"
+    if objects_subdir:
+        return f"{OBJECTS_DIR}/{objects_subdir}/{tail}"
+    return f"{OBJECTS_DIR}/{tail}"
 
 
 def _abs_object_path(data_root: Path, rel: str) -> Path:
@@ -392,3 +418,381 @@ def list_manifest_items(data_root: Path) -> tuple[list[dict[str, Any]], int, int
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     total = _total_bytes_used(raw_items)
     return rows, len(rows), total
+
+
+def _zip_arcname_norm(name: str) -> str:
+    return name.replace("\\", "/").lstrip("/")
+
+
+def _find_code_by_sha256(items: dict[str, Any], h: str) -> Optional[str]:
+    for cid, meta in items.items():
+        if isinstance(meta, dict) and isinstance(cid, str) and str(meta.get("sha256") or "") == h:
+            return cid
+    return None
+
+
+def build_media_export_zip_bytes(data_root: Path, codes: list[str]) -> tuple[str, bytes]:
+    """多选导出：ZIP 内含 pathy_media_export.json（manifest 全字段 + 反向引用）与 objects 相对路径二进制。"""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in codes:
+        c = validate_code(raw)
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    if not ordered:
+        raise HTTPException(status_code=400, detail="请至少选择一个有效的 media code")
+
+    doc: dict[str, Any] = {
+        "version": 1,
+        "exported_at": _now_iso(),
+        "codes_order": [],
+        "items": {},
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for code in ordered:
+            item = dict(get_media_item(data_root, code))
+            rel_old = str(item.get("rel_storage") or "")
+            if not rel_old:
+                raise HTTPException(status_code=500, detail=f"{code}: manifest 缺少 rel_storage")
+            path_bin, _ = get_media_file_path(data_root, code)
+            arc = _zip_arcname_norm(rel_old)
+            backs = get_backrefs_for_code(data_root, code)
+            doc["codes_order"].append(code)
+            doc["items"][code] = {
+                "manifest": item,
+                "backrefs": [{"wiki_path": e.wiki_path, "heading_path": e.heading_path} for e in backs],
+            }
+            zf.write(path_bin, arc)
+        zf.writestr(
+            EXPORT_JSON_NAME,
+            json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+        )
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fname = f"pathy-media-export-{ts}.zip"
+    return fname, buf.getvalue()
+
+
+def import_media_zip(
+    data_root: Path,
+    zip_bytes: bytes,
+    objects_subdir: str,
+    *,
+    max_upload_bytes: int,
+    total_quota_bytes: int,
+    max_zip_bytes: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    解析本服务导出的 ZIP，将媒体登记进 manifest；二进制落在 media/objects[/target_dir]/…。
+    返回 (行结果列表, 摘要 message)。
+    """
+    if len(zip_bytes) > max_zip_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"zip 超过上限 {max_zip_bytes} 字节",
+        )
+    sub = normalize_media_objects_subdir(objects_subdir)
+    ensure_media_tree(data_root)
+    man = _load_manifest(data_root)
+    items_raw = man.get("items")
+    if not isinstance(items_raw, dict):
+        items_raw = {}
+    items: dict[str, Any] = items_raw
+    man["items"] = items
+
+    try:
+        zf_ctx = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as e:
+        raise HTTPException(status_code=400, detail="无效的 zip 文件") from e
+
+    rows: list[dict[str, Any]] = []
+    backrefs_delta: dict[str, list[dict[str, str]]] = {}
+    used = _total_bytes_used(items)
+    extra_bytes = 0
+
+    with zf_ctx as zf:
+        name_map = {_zip_arcname_norm(n): n for n in zf.namelist()}
+        export_key = name_map.get(EXPORT_JSON_NAME)
+        if export_key is None:
+            for k, v in name_map.items():
+                if k == EXPORT_JSON_NAME or k.endswith("/" + EXPORT_JSON_NAME):
+                    export_key = v
+                    break
+        if export_key is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"zip 中缺少 {EXPORT_JSON_NAME}（请使用本服务导出的多媒体包）",
+            )
+        try:
+            export_doc = json.loads(zf.read(export_key).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=400, detail="导出描述 JSON 损坏或无法解码") from e
+
+        if not isinstance(export_doc, dict):
+            raise HTTPException(status_code=400, detail="导出描述格式错误")
+        raw_items = export_doc.get("items")
+        if not isinstance(raw_items, dict):
+            raise HTTPException(status_code=400, detail="导出描述缺少 items")
+        codes_order = export_doc.get("codes_order")
+        if not isinstance(codes_order, list) or not codes_order:
+            codes_order = list(raw_items.keys())
+
+        allowed_bin: set[str] = set()
+        for _c, wrap in raw_items.items():
+            if not isinstance(wrap, dict):
+                continue
+            m = wrap.get("manifest")
+            if isinstance(m, dict):
+                rel = str(m.get("rel_storage") or "")
+                if rel:
+                    allowed_bin.add(_zip_arcname_norm(rel))
+
+        for source_code in codes_order:
+            if not isinstance(source_code, str):
+                continue
+            try:
+                source_code_v = validate_code(source_code)
+            except HTTPException:
+                rows.append(
+                    {
+                        "source_code": str(source_code),
+                        "result_code": "",
+                        "status": "error",
+                        "detail": "无效的 source code",
+                    }
+                )
+                continue
+            wrap = raw_items.get(source_code_v)
+            if not isinstance(wrap, dict):
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": "导出 items 中无此 code",
+                    }
+                )
+                continue
+            m = wrap.get("manifest")
+            if not isinstance(m, dict):
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": "缺少 manifest",
+                    }
+                )
+                continue
+            rel_in_zip = _zip_arcname_norm(str(m.get("rel_storage") or ""))
+            if not rel_in_zip or rel_in_zip not in allowed_bin:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": "manifest.rel_storage 无效",
+                    }
+                )
+                continue
+            zip_inner = name_map.get(rel_in_zip)
+            if not zip_inner:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": f"zip 内缺少文件 {rel_in_zip}",
+                    }
+                )
+                continue
+            try:
+                data = zf.read(zip_inner)
+            except OSError as e:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": f"读取 zip 内文件失败: {e}",
+                    }
+                )
+                continue
+            exp_sha = str(m.get("sha256") or "")
+            got_sha = _sha256_bytes(data)
+            if exp_sha and exp_sha != got_sha:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": "sha256 与导出描述不一致",
+                    }
+                )
+                continue
+            if len(data) > max_upload_bytes:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": f"单文件超过上限 {max_upload_bytes} 字节",
+                    }
+                )
+                continue
+
+            existing_by_sha = _find_code_by_sha256(items, got_sha)
+            if existing_by_sha is not None:
+                rc = existing_by_sha
+                if rc == source_code_v:
+                    rows.append(
+                        {
+                            "source_code": source_code_v,
+                            "result_code": rc,
+                            "status": "skipped_identical",
+                            "detail": "已登记且内容相同",
+                        }
+                    )
+                else:
+                    rows.append(
+                        {
+                            "source_code": source_code_v,
+                            "result_code": rc,
+                            "status": "deduplicated_existing",
+                            "detail": "内容已存在于其他 code，未重复落盘",
+                        }
+                    )
+                br = wrap.get("backrefs")
+                if isinstance(br, list) and rc:
+                    backrefs_delta.setdefault(rc, []).extend(
+                        r
+                        for r in br
+                        if isinstance(r, dict) and isinstance(r.get("wiki_path"), str)
+                    )
+                continue
+
+            cur = items.get(source_code_v)
+            if isinstance(cur, dict) and str(cur.get("sha256") or "") == got_sha:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": source_code_v,
+                        "status": "skipped_identical",
+                        "detail": "已登记且内容相同",
+                    }
+                )
+                br = wrap.get("backrefs")
+                if isinstance(br, list):
+                    backrefs_delta.setdefault(source_code_v, []).extend(
+                        r
+                        for r in br
+                        if isinstance(r, dict) and isinstance(r.get("wiki_path"), str)
+                    )
+                continue
+
+            if isinstance(cur, dict) and str(cur.get("sha256") or "") != got_sha:
+                new_code = secrets.token_hex(12)
+                result_code = new_code
+                detail = "目标环境已有同 code 不同内容，已分配新 code"
+            else:
+                new_code = None
+                result_code = source_code_v
+                detail = ""
+
+            target_code = result_code
+            ext = _normalize_ext(str(m.get("original_name") or rel_in_zip))
+            if ext not in _EXT_WHITELIST:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": f"不允许的扩展名 {ext or '(空)'}",
+                    }
+                )
+                continue
+
+            if used + extra_bytes + len(data) > total_quota_bytes:
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": "",
+                        "status": "error",
+                        "detail": f"超过媒体总配额 {total_quota_bytes} 字节",
+                    }
+                )
+                continue
+
+            rel_new = _object_rel_path(target_code, ext, objects_subdir=sub)
+            path_new = _abs_object_path(data_root, rel_new)
+            path_new.parent.mkdir(parents=True, exist_ok=True)
+            path_new.write_bytes(data)
+            extra_bytes += len(data)
+
+            new_row: dict[str, Any] = {
+                "code": target_code,
+                "sha256": got_sha,
+                "mime": str(m.get("mime") or resolve_mime(ext, None)),
+                "size": len(data),
+                "rel_storage": rel_new.replace("\\", "/"),
+                "title": m.get("title"),
+                "original_name": m.get("original_name"),
+                "created_at": str(m.get("created_at") or _now_iso()),
+            }
+            if new_code:
+                items[target_code] = new_row
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": target_code,
+                        "status": "remapped",
+                        "detail": detail,
+                    }
+                )
+            else:
+                items[target_code] = new_row
+                rows.append(
+                    {
+                        "source_code": source_code_v,
+                        "result_code": target_code,
+                        "status": "imported",
+                        "detail": "已写入并登记",
+                    }
+                )
+
+            br = wrap.get("backrefs")
+            if isinstance(br, list):
+                backrefs_delta.setdefault(target_code, []).extend(
+                    r
+                    for r in br
+                    if isinstance(r, dict) and isinstance(r.get("wiki_path"), str)
+                )
+
+    dirty_manifest = any(r.get("status") in ("imported", "remapped") for r in rows)
+    if dirty_manifest:
+        _save_manifest(data_root, man)
+    if backrefs_delta:
+        mp = _load_backrefs(data_root)
+        for code, add_rows in backrefs_delta.items():
+            cur_list = list(mp.get(code) or [])
+            seen_k: set[tuple[str, str]] = set()
+            for row in cur_list:
+                if isinstance(row, dict) and isinstance(row.get("wiki_path"), str):
+                    seen_k.add((row["wiki_path"], str(row.get("heading_path") or "")))
+            for r in add_rows:
+                wp = str(r.get("wiki_path") or "")
+                hp = str(r.get("heading_path") or "")
+                key = (wp, hp)
+                if not wp or key in seen_k:
+                    continue
+                seen_k.add(key)
+                cur_list.append({"wiki_path": wp, "heading_path": hp})
+            mp[code] = cur_list
+        _save_backrefs(data_root, mp)
+
+    n_ok = sum(1 for r in rows if r.get("status") in ("imported", "remapped"))
+    n_skip = sum(1 for r in rows if r.get("status") in ("skipped_identical", "deduplicated_existing"))
+    n_err = sum(1 for r in rows if r.get("status") == "error")
+    msg = f"完成：新增 {n_ok}，跳过/去重 {n_skip}，失败 {n_err}；对象子目录={sub or '(默认)'}"
+    return rows, msg
