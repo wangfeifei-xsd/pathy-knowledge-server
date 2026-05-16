@@ -394,6 +394,89 @@ def list_media_manifest_summary(data_root: Path) -> tuple[int, int]:
     return n, used
 
 
+def delete_media_codes(data_root: Path, codes: list[str]) -> list[dict[str, Any]]:
+    """
+    从 manifest 移除登记；若 rel_storage 无其他条目引用则删除磁盘对象文件。
+    同时从 .pathy/media_backrefs.json 移除对应 code。
+    返回每行：code, status(deleted|not_found|skipped_invalid), removed_file, detail。
+    """
+    ensure_media_tree(data_root)
+    man = _load_manifest(data_root)
+    items_raw = man.get("items")
+    if not isinstance(items_raw, dict):
+        items_raw = {}
+    items: dict[str, Any] = items_raw
+    man["items"] = items
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in codes:
+        try:
+            c = validate_code(raw)
+        except HTTPException:
+            results.append(
+                {
+                    "code": str(raw).strip() or "?",
+                    "status": "skipped_invalid",
+                    "removed_file": False,
+                    "detail": "无效的 media code",
+                }
+            )
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        ordered.append(c)
+
+    br = _load_backrefs(data_root)
+    any_deleted = False
+
+    for code in ordered:
+        it = items.get(code)
+        if not isinstance(it, dict):
+            results.append(
+                {"code": code, "status": "not_found", "removed_file": False, "detail": "未在 manifest 中登记"}
+            )
+            continue
+
+        rel = str(it.get("rel_storage") or "").replace("\\", "/")
+        del items[code]
+        br.pop(code, None)
+        any_deleted = True
+
+        removed_file = False
+        if rel:
+            still_used = any(
+                isinstance(v, dict)
+                and str(v.get("rel_storage") or "").replace("\\", "/") == rel
+                for v in items.values()
+            )
+            if not still_used:
+                try:
+                    path = _abs_object_path(data_root, rel)
+                    if path.is_file():
+                        path.unlink()
+                        removed_file = True
+                except OSError:
+                    pass
+
+        results.append(
+            {
+                "code": code,
+                "status": "deleted",
+                "removed_file": removed_file,
+                "detail": "已移除登记" + ("；已删除对象文件" if removed_file else ""),
+            }
+        )
+
+    if any_deleted:
+        _save_manifest(data_root, man)
+        _save_backrefs(data_root, br)
+
+    return results
+
+
 def list_manifest_items(data_root: Path) -> tuple[list[dict[str, Any]], int, int]:
     """返回 (条目 dict 列表, 条数, 字节合计)，按 created_at 新到旧排序。"""
     man = _load_manifest(data_root)

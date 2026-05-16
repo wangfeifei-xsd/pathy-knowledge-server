@@ -368,6 +368,36 @@ class MediaImportZipResponse(BaseModel):
     )
 
 
+class MediaDeleteBatchRequest(BaseModel):
+    codes: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="待删除的 media code 列表；会去重并按序处理",
+    )
+
+
+class MediaDeleteBatchRow(BaseModel):
+    code: str
+    status: str = Field(description="deleted / not_found / skipped_invalid")
+    removed_file: bool = Field(default=False, description="是否尝试删除了 objects 下的文件")
+    detail: str = Field(default="", description="说明")
+
+
+class MediaDeleteBatchResponse(BaseModel):
+    results: list[MediaDeleteBatchRow] = Field(default_factory=list)
+    deleted_count: int = Field(default=0, ge=0)
+    not_found_count: int = Field(default=0, ge=0)
+    message: str = Field(default="", description="汇总说明")
+
+
+class MediaDeleteOneResponse(BaseModel):
+    code: str
+    deleted: bool
+    removed_file: bool = Field(default=False, description="是否删除了磁盘上的对象文件")
+    message: str = Field(default="")
+
+
 class WikiEmbedRequest(BaseModel):
     path: str = Field(description="wiki 相对路径，仅支持 .md 文件")
 

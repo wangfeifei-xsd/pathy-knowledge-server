@@ -5,12 +5,16 @@ from __future__ import annotations
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.config import Settings, get_settings
 from app.models.schemas import (
     MediaBackrefsResponse,
+    MediaDeleteBatchRequest,
+    MediaDeleteBatchResponse,
+    MediaDeleteBatchRow,
+    MediaDeleteOneResponse,
     MediaExportZipRequest,
     MediaImportZipResponse,
     MediaImportZipRow,
@@ -24,6 +28,7 @@ from app.models.schemas import (
 from app.services.media_codes import merge_extracted_and_extra_codes
 from app.services.media_store import (
     build_media_export_zip_bytes,
+    delete_media_codes,
     ensure_media_tree,
     get_backrefs_for_code,
     get_media_file_path,
@@ -35,6 +40,7 @@ from app.services.media_store import (
     reindex_media_backrefs,
     register_upload,
     resolve_media_codes_metadata,
+    validate_code,
 )
 
 router = APIRouter(prefix="/api/v1/media", tags=["多媒体"])
@@ -175,6 +181,34 @@ async def post_import_media_zip(
 
 
 @router.post(
+    "/batch-delete",
+    response_model=MediaDeleteBatchResponse,
+    summary="批量删除媒体",
+    description=(
+        "从 manifest 移除多条登记；若某 rel_storage 无其他条目引用则删除对应对象文件。"
+        "并从 .pathy/media_backrefs.json 移除这些 code 的反向引用记录。"
+    ),
+)
+def post_media_batch_delete(
+    body: MediaDeleteBatchRequest,
+    settings: Settings = Depends(get_settings),
+) -> MediaDeleteBatchResponse:
+    data_root = settings.data_root.resolve()
+    raw_rows = delete_media_codes(data_root, body.codes)
+    rows = [MediaDeleteBatchRow.model_validate(r) for r in raw_rows]
+    n_del = sum(1 for r in rows if r.status == "deleted")
+    n_nf = sum(1 for r in rows if r.status == "not_found")
+    n_inv = sum(1 for r in rows if r.status == "skipped_invalid")
+    msg = f"已处理 {len(rows)} 条：删除 {n_del}，未找到 {n_nf}，跳过无效 {n_inv}"
+    return MediaDeleteBatchResponse(
+        results=rows,
+        deleted_count=n_del,
+        not_found_count=n_nf,
+        message=msg,
+    )
+
+
+@router.post(
     "/resolve-from-text",
     response_model=MediaResolveFromTextResponse,
     summary="解析正文中的多媒体标签并查询登记信息",
@@ -235,4 +269,28 @@ def get_media_binary(code: str, settings: Settings = Depends(get_settings)) -> F
         media_type=mime,
         filename=fname,
         content_disposition_type="inline",
+    )
+
+
+@router.delete(
+    "/{code}",
+    response_model=MediaDeleteOneResponse,
+    summary="按 code 删除单条媒体",
+    description="同批量删除逻辑；若媒体不存在则 404。",
+)
+def delete_media_one(code: str, settings: Settings = Depends(get_settings)) -> MediaDeleteOneResponse:
+    data_root = settings.data_root.resolve()
+    validate_code(code)
+    rows = delete_media_codes(data_root, [code])
+    r = rows[0]
+    if r["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="媒体不存在")
+    if r["status"] == "skipped_invalid":
+        raise HTTPException(status_code=400, detail=str(r.get("detail") or "无效的 media code"))
+    removed = bool(r.get("removed_file"))
+    return MediaDeleteOneResponse(
+        code=code,
+        deleted=True,
+        removed_file=removed,
+        message="已删除" + ("；对象文件已删除" if removed else "；对象文件未删除（仍被引用或不存在）"),
     )
