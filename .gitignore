@@ -10,6 +10,7 @@ __pycache__/
 !.env.example
 # Runtime knowledge base、向量索引与密钥文件（勿提交）
 data/
+data/.pathy/wiki_embedding_index.json
 .idea/
 *.egg-info/
 .eggs/
