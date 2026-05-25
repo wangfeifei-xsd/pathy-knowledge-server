@@ -37,6 +37,7 @@ from app.services.media_store import (
     list_manifest_items,
     list_media_manifest_summary,
     normalize_media_objects_subdir,
+    normalize_media_subdir,
     reindex_media_backrefs,
     register_upload,
     resolve_media_codes_metadata,
@@ -146,19 +147,40 @@ def post_export_media_zip(
     response_model=MediaImportZipResponse,
     summary="从导出 ZIP 导入",
     description=(
-        "multipart：file 为本服务导出的 zip；target_dir 为可选的 media/objects 下子目录（如 project/handbook），"
-        "用于归类落盘路径；留空则与上传默认一致为 objects/ab/cd/…。"
+        "multipart：file 为本服务导出的 zip；target_folder 为可选的 media/ 下子目录"
+        "（含首段，可填 'objects'、'HSYJY' 或新建的任意层级如 'albums/2025'），用于归类落盘路径。"
+        "留空则与上传默认一致为 objects/ab/cd/…。\n"
+        "兼容旧字段：target_dir 表示 media/objects/ 下子目录（不含 'objects' 段）；"
+        "若同时提供 target_dir 与 target_folder，将以 target_folder 为准并在响应 warning 中标注。\n"
         "若 code 冲突且内容不同将分配新 code；内容去重则合并到已有 code。"
         "导出包中的 backrefs 会尝试合并进 .pathy/media_backrefs.json。"
     ),
 )
 async def post_import_media_zip(
     file: UploadFile = File(..., description="pathy 导出的多媒体 zip"),
-    target_dir: str = Form("", description="media/objects 下子目录，段间用 /"),
+    target_dir: str = Form("", description="兼容字段：media/objects 下子目录，段间用 /"),
+    target_folder: str = Form(
+        "",
+        description="media/ 下任意子目录（含首段，可为 'objects' 或自定义），段间用 /；留空默认 objects/ab/cd/…",
+    ),
     settings: Settings = Depends(get_settings),
 ) -> MediaImportZipResponse:
     data_root = settings.data_root.resolve()
-    sub_norm = normalize_media_objects_subdir(target_dir)
+
+    target_dir_norm = normalize_media_objects_subdir(target_dir)
+    target_folder_norm = normalize_media_subdir(target_folder)
+
+    warning = ""
+    if target_folder_norm and target_dir_norm:
+        warning = "同时提供了 target_dir 与 target_folder，已以 target_folder 为准；target_dir 被忽略"
+        effective_subdir = target_folder_norm
+    elif target_folder_norm:
+        effective_subdir = target_folder_norm
+    elif target_dir_norm:
+        effective_subdir = f"objects/{target_dir_norm}"
+    else:
+        effective_subdir = ""
+
     raw = await file.read()
     max_zip = max(
         settings.media_max_upload_bytes * 200,
@@ -167,7 +189,7 @@ async def post_import_media_zip(
     rows_raw, msg = import_media_zip(
         data_root,
         raw,
-        sub_norm,
+        effective_subdir,
         max_upload_bytes=settings.media_max_upload_bytes,
         total_quota_bytes=settings.media_total_quota_bytes,
         max_zip_bytes=max_zip,
@@ -176,7 +198,9 @@ async def post_import_media_zip(
     return MediaImportZipResponse(
         results=rows,
         message=msg,
-        target_dir_normalized=sub_norm,
+        target_dir_normalized=target_dir_norm,
+        target_folder_normalized=effective_subdir,
+        warning=warning,
     )
 
 

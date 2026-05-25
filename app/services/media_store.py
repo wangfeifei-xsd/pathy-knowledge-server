@@ -119,31 +119,56 @@ def resolve_mime(ext: str, upload_content_type: Optional[str]) -> str:
     return ct
 
 
+def _validate_subdir_segments(parts: list[str], *, field: str) -> None:
+    if len(parts) > 24:
+        raise HTTPException(status_code=400, detail=f"{field} 层级过多（最多 24 段）")
+    for p in parts:
+        if p == "..":
+            raise HTTPException(status_code=400, detail=f"{field} 不允许包含 '..'")
+        if not _SUBDIR_SEG.match(p):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} 每段仅允许字母、数字、下划线、连字符，且非空",
+            )
+
+
 def normalize_media_objects_subdir(raw: str) -> str:
     """media/objects 下的可选子路径，如 batch2024/handbook；空表示默认 objects/ab/cd/…"""
     s = (raw or "").strip().replace("\\", "/").strip("/")
     if not s:
         return ""
     parts = [p for p in s.split("/") if p and p != "."]
-    if len(parts) > 24:
-        raise HTTPException(status_code=400, detail="target_dir 层级过多（最多 24 段）")
-    for p in parts:
-        if p == "..":
-            raise HTTPException(status_code=400, detail="target_dir 不允许包含 '..'")
-        if not _SUBDIR_SEG.match(p):
-            raise HTTPException(
-                status_code=400,
-                detail="target_dir 每段仅允许字母、数字、下划线、连字符，且非空",
-            )
+    _validate_subdir_segments(parts, field="target_dir")
+    return "/".join(parts)
+
+
+def normalize_media_subdir(raw: str) -> str:
+    """media/ 下的可选子路径（含首段，可以是 objects 或任意已存在子目录），如 HSYJY、objects/foo。"""
+    s = (raw or "").strip().replace("\\", "/").strip("/")
+    if not s:
+        return ""
+    parts = [p for p in s.split("/") if p and p != "."]
+    _validate_subdir_segments(parts, field="target_folder")
     return "/".join(parts)
 
 
 def _object_rel_path(code: str, ext_with_dot: str, *, objects_subdir: str = "") -> str:
+    """旧入口：在 media/objects/ 之下拼路径。"""
     a, b = code[:2], code[2:4] if len(code) > 2 else "xx"
     safe_ext = ext_with_dot if ext_with_dot.startswith(".") else f".{ext_with_dot}"
     tail = f"{a}/{b}/{code}{safe_ext}"
     if objects_subdir:
         return f"{OBJECTS_DIR}/{objects_subdir}/{tail}"
+    return f"{OBJECTS_DIR}/{tail}"
+
+
+def _object_rel_path_in_media(code: str, ext_with_dot: str, *, media_subdir: str) -> str:
+    """新入口：在 media/<media_subdir>/ 之下拼路径；media_subdir 为空时退回到 objects/ 默认分层。"""
+    a, b = code[:2], code[2:4] if len(code) > 2 else "xx"
+    safe_ext = ext_with_dot if ext_with_dot.startswith(".") else f".{ext_with_dot}"
+    tail = f"{a}/{b}/{code}{safe_ext}"
+    if media_subdir:
+        return f"{media_subdir}/{tail}"
     return f"{OBJECTS_DIR}/{tail}"
 
 
@@ -477,6 +502,20 @@ def delete_media_codes(data_root: Path, codes: list[str]) -> list[dict[str, Any]
     return results
 
 
+def _folder_from_rel_storage(rel_storage: str) -> str:
+    """从 rel_storage（如 'objects/ab/cd/xxx.png' 或 'HSYJY/ab/cd/xxx.png'）反推所属 media 子目录。
+
+    规则：去掉尾部三段（aa/bb/<code>.<ext>），剩余即所属子目录；不足三段则返回空串。
+    """
+    s = (rel_storage or "").replace("\\", "/").strip("/")
+    if not s:
+        return ""
+    parts = s.split("/")
+    if len(parts) <= 3:
+        return ""
+    return "/".join(parts[:-3])
+
+
 def list_manifest_items(data_root: Path) -> tuple[list[dict[str, Any]], int, int]:
     """返回 (条目 dict 列表, 条数, 字节合计)，按 created_at 新到旧排序。"""
     man = _load_manifest(data_root)
@@ -487,6 +526,7 @@ def list_manifest_items(data_root: Path) -> tuple[list[dict[str, Any]], int, int
     for code, v in raw_items.items():
         if not isinstance(v, dict) or not isinstance(code, str):
             continue
+        rel = str(v.get("rel_storage") or "").replace("\\", "/")
         rows.append(
             {
                 "code": code,
@@ -496,6 +536,7 @@ def list_manifest_items(data_root: Path) -> tuple[list[dict[str, Any]], int, int
                 "original_name": v.get("original_name"),
                 "created_at": str(v.get("created_at") or ""),
                 "sha256": str(v.get("sha256") or ""),
+                "folder": _folder_from_rel_storage(rel),
             }
         )
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
@@ -560,14 +601,17 @@ def build_media_export_zip_bytes(data_root: Path, codes: list[str]) -> tuple[str
 def import_media_zip(
     data_root: Path,
     zip_bytes: bytes,
-    objects_subdir: str,
+    target_subdir: str,
     *,
     max_upload_bytes: int,
     total_quota_bytes: int,
     max_zip_bytes: int,
 ) -> tuple[list[dict[str, Any]], str]:
     """
-    解析本服务导出的 ZIP，将媒体登记进 manifest；二进制落在 media/objects[/target_dir]/…。
+    解析本服务导出的 ZIP，将媒体登记进 manifest；二进制落在 media/<target_subdir>/…。
+
+    target_subdir 为相对 media/ 层根的完整子路径（含首段；空字符串表示默认 objects/aa/bb/…）。
+    调用方负责把 `target_dir`（objects/ 下）或 `target_folder`（media/ 下）翻译成 target_subdir 后传入。
     返回 (行结果列表, 摘要 message)。
     """
     if len(zip_bytes) > max_zip_bytes:
@@ -575,7 +619,7 @@ def import_media_zip(
             status_code=413,
             detail=f"zip 超过上限 {max_zip_bytes} 字节",
         )
-    sub = normalize_media_objects_subdir(objects_subdir)
+    sub = normalize_media_subdir(target_subdir)
     ensure_media_tree(data_root)
     man = _load_manifest(data_root)
     items_raw = man.get("items")
@@ -807,7 +851,7 @@ def import_media_zip(
                 )
                 continue
 
-            rel_new = _object_rel_path(target_code, ext, objects_subdir=sub)
+            rel_new = _object_rel_path_in_media(target_code, ext, media_subdir=sub)
             path_new = _abs_object_path(data_root, rel_new)
             path_new.parent.mkdir(parents=True, exist_ok=True)
             path_new.write_bytes(data)

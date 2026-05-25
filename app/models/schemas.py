@@ -302,6 +302,10 @@ class MediaListItem(BaseModel):
     original_name: Optional[str] = None
     created_at: str = Field(default="", description="ISO 时间")
     sha256: str = Field(default="", description="内容哈希")
+    folder: str = Field(
+        default="",
+        description="所属 media 子目录（rel_storage 去掉末尾 aa/bb/<code>.<ext>）；空表示位于 objects/ 默认分层路径下",
+    )
 
 
 class MediaListResponse(BaseModel):
@@ -364,7 +368,15 @@ class MediaImportZipResponse(BaseModel):
     message: str = Field(default="", description="汇总说明")
     target_dir_normalized: str = Field(
         default="",
-        description="实际写入的 media/objects 子目录（空为默认分层路径）",
+        description="兼容旧字段：归一化后的 target_dir（objects/ 下子目录）；当未提供 target_dir 时为空",
+    )
+    target_folder_normalized: str = Field(
+        default="",
+        description="归一化后的 media/ 子路径（含首段，含 'objects' 段）；空为默认 objects/aa/bb/…",
+    )
+    warning: str = Field(
+        default="",
+        description="非致命提示（如同时提供 target_dir 与 target_folder 时，将以 target_folder 为准）",
     )
 
 
