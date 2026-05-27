@@ -50,11 +50,11 @@ router = APIRouter(prefix="/api/v1/media", tags=["多媒体"])
 @router.post(
     "/upload",
     response_model=MediaUploadResponse,
-    summary="上传图片/视频",
+    summary="上传图片/视频/APK",
     description="写入 data/media/objects/… 并登记 manifest；同 sha256 自动去重返回已有 code。",
 )
 async def upload_media(
-    file: UploadFile = File(..., description="图片或视频文件"),
+    file: UploadFile = File(..., description="图片、视频或 APK 文件"),
     title: Optional[str] = Form(None, description="可选标题，写入 manifest"),
     settings: Settings = Depends(get_settings),
 ) -> MediaUploadResponse:

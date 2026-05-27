@@ -34,6 +34,7 @@ _EXT_WHITELIST: dict[str, str] = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
     ".mov": "video/quicktime",
+    ".apk": "application/vnd.android.package-archive",
 }
 
 
