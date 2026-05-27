@@ -40,9 +40,9 @@ class Settings(BaseSettings):
 
     max_file_bytes: int = Field(default=2_097_152, description="单文件最大字节数（默认 2MB）")
     media_max_upload_bytes: int = Field(
-        default=52_428_800,
+        default=209_715_200,
         alias="MEDIA_MAX_UPLOAD_BYTES",
-        description="单媒体上传最大字节（默认 50MB）",
+        description="单媒体上传最大字节（默认 200MB，含 APK）",
     )
     media_total_quota_bytes: int = Field(
         default=2_147_483_648,
