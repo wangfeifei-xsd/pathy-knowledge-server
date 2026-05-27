@@ -51,17 +51,25 @@ router = APIRouter(prefix="/api/v1/media", tags=["多媒体"])
     "/upload",
     response_model=MediaUploadResponse,
     summary="上传图片/视频/APK",
-    description="写入 data/media/objects/… 并登记 manifest；同 sha256 自动去重返回已有 code。",
+    description=(
+        "写入 data/media/ 并登记 manifest；可选 target_folder 指定 media/ 下子目录。"
+        "空则走默认 objects/aa/bb/…；同 sha256 自动去重返回已有 code。"
+    ),
 )
 async def upload_media(
     file: UploadFile = File(..., description="图片、视频或 APK 文件"),
     title: Optional[str] = Form(None, description="可选标题，写入 manifest"),
+    target_folder: str = Form(
+        "",
+        description="可选，media/ 层下子目录（如 HSYJY、objects/batch2024）；空表示默认 objects/aa/bb/…",
+    ),
     settings: Settings = Depends(get_settings),
 ) -> MediaUploadResponse:
     data_root = settings.data_root.resolve()
     ensure_media_tree(data_root)
     raw = await file.read()
     name = (file.filename or "upload.bin").strip() or "upload.bin"
+    target_folder_norm = normalize_media_subdir(target_folder)
     code, dedup = register_upload(
         data_root,
         filename=name,
@@ -70,6 +78,7 @@ async def upload_media(
         title=title,
         max_upload_bytes=settings.media_max_upload_bytes,
         total_quota_bytes=settings.media_total_quota_bytes,
+        media_subdir=target_folder_norm,
     )
     meta = get_media_item(data_root, code)
     return MediaUploadResponse(

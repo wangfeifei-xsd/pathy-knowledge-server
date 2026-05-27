@@ -219,6 +219,7 @@ def register_upload(
     title: Optional[str],
     max_upload_bytes: int,
     total_quota_bytes: int,
+    media_subdir: str = "",
 ) -> tuple[str, bool]:
     """写入对象存储并更新 manifest。若 sha256 已存在则返回已有 code（去重）。"""
     if not data:
@@ -250,7 +251,8 @@ def register_upload(
         )
 
     code = secrets.token_hex(12)
-    rel = _object_rel_path(code, ext)
+    sub = normalize_media_subdir(media_subdir)
+    rel = _object_rel_path_in_media(code, ext, media_subdir=sub)
     path = _abs_object_path(data_root, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
