@@ -64,7 +64,6 @@ def _sha256_bytes(data: bytes) -> str:
 def ensure_media_tree(data_root: Path) -> Path:
     root = media_layer_root(data_root)
     root.mkdir(parents=True, exist_ok=True)
-    (root / OBJECTS_DIR).mkdir(parents=True, exist_ok=True)
     return root
 
 

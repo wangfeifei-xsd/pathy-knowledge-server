@@ -29,7 +29,6 @@ from app.services.media_codes import merge_extracted_and_extra_codes
 from app.services.media_store import (
     build_media_export_zip_bytes,
     delete_media_codes,
-    ensure_media_tree,
     get_backrefs_for_code,
     get_media_file_path,
     get_media_item,
@@ -66,7 +65,6 @@ async def upload_media(
     settings: Settings = Depends(get_settings),
 ) -> MediaUploadResponse:
     data_root = settings.data_root.resolve()
-    ensure_media_tree(data_root)
     raw = await file.read()
     name = (file.filename or "upload.bin").strip() or "upload.bin"
     target_folder_norm = normalize_media_subdir(target_folder)
