@@ -255,6 +255,20 @@ def _format_injected_block(rel: str, heading_path: str, body: str) -> str:
     return f"### {rel}\n\n{b}"
 
 
+def _normalize_wiki_prefixes(raw: list[str] | None) -> list[str]:
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        p = (item or "").strip()
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
 def _collect_wiki_pairs(
     data_root: Path,
     rel_prefix: str,
@@ -273,6 +287,31 @@ def _collect_wiki_pairs(
         rel = path.relative_to(base).as_posix()
         text, _ = storage.read_file(data_root, LayerName.wiki, rel, max_bytes)
         out.append((rel, text))
+    return out
+
+
+def _collect_wiki_pairs_for_prefixes(
+    data_root: Path,
+    rel_prefixes: list[str],
+    max_files: int,
+    max_bytes: int,
+) -> list[tuple[str, str]]:
+    prefixes = _normalize_wiki_prefixes(rel_prefixes)
+    if not prefixes:
+        return _collect_wiki_pairs(data_root, "", max_files, max_bytes)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for prefix in prefixes:
+        if len(out) >= max_files:
+            break
+        pairs = _collect_wiki_pairs(data_root, prefix, max_files - len(out), max_bytes)
+        for rel, text in pairs:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            out.append((rel, text))
+            if len(out) >= max_files:
+                break
     return out
 
 
@@ -329,7 +368,7 @@ class WikiKeywordRecallArtifacts:
 async def _score_chunks_vector_with_model(
     settings: Settings,
     query: str,
-    wiki_prefix: str,
+    wiki_prefixes: list[str],
     top_n: int,
 ) -> tuple[list[tuple[float, _IndexedChunk]], DialogueRecallLaneStatus]:
     """模型向量召回：query embedding 后在已嵌入索引里做余弦检索；同时返回该路状态。"""
@@ -368,11 +407,12 @@ async def _score_chunks_vector_with_model(
             embedding_model=em.model,
         )
     qv = emb.data[0].embedding
-    hits = search_wiki_vectors(settings, qv, wiki_prefix, top_n)
+    prefixes = _normalize_wiki_prefixes(wiki_prefixes)
+    hits = search_wiki_vectors(settings, qv, prefixes, top_n)
     scored = [(h.score, _IndexedChunk(h.rel, h.heading_path, h.body)) for h in hits]
     logger.info(
-        "dialogue_recall vector_done prefix=%s top_n=%d hits=%d model=%s",
-        wiki_prefix or "/",
+        "dialogue_recall vector_done prefixes=%s top_n=%d hits=%d model=%s",
+        prefixes or ["/"],
         top_n,
         len(scored),
         em.model,
@@ -473,10 +513,11 @@ async def perform_wiki_keyword_recall(
     raw_terms = _extract_query_terms(q)
     stopwords = set(read_effective_stopwords(settings))
     terms = _filter_terms(raw_terms, stopwords)
+    prefixes = _normalize_wiki_prefixes(body.wiki_prefixes)
     logger.info(
-        "dialogue_recall start query_len=%d wiki_prefix=%s max_files=%d top_k=%d bm25_top_n=%d vector_top_n=%d terms_raw=%d terms_kept=%d",
+        "dialogue_recall start query_len=%d wiki_prefixes=%s max_files=%d top_k=%d bm25_top_n=%d vector_top_n=%d terms_raw=%d terms_kept=%d",
         len(q),
-        (body.wiki_prefix or "").strip() or "/",
+        prefixes or ["/"],
         body.max_files,
         body.top_k_chunks,
         body.bm25_top_n,
@@ -485,8 +526,9 @@ async def perform_wiki_keyword_recall(
         len(terms),
     )
 
-    prefix = (body.wiki_prefix or "").strip()
-    pairs = _collect_wiki_pairs(data_root, prefix, body.max_files, settings.max_file_bytes)
+    pairs = _collect_wiki_pairs_for_prefixes(
+        data_root, prefixes, body.max_files, settings.max_file_bytes
+    )
 
     all_chunks: list[_IndexedChunk] = []
     for rel, full in pairs:
@@ -538,7 +580,7 @@ async def perform_wiki_keyword_recall(
     vector_scored, vector_lane = await _score_chunks_vector_with_model(
         settings,
         q,
-        prefix,
+        prefixes,
         body.vector_top_n,
     )
     vector_scored.sort(key=lambda x: (-x[0], x[1].rel, x[1].heading_path))

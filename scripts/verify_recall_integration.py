@@ -45,7 +45,7 @@ def main() -> int:
 
     payload = {
         "query": "pathy_bm25_unique_token karpathywiki 怎么用",
-        "wiki_prefix": "",
+        "wiki_prefixes": [],
         "top_k_chunks": 4,
     }
     r = client.post("/api/v1/dialogue/recall", json=payload)

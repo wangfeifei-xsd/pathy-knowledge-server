@@ -221,15 +221,31 @@ def _cosine_dense(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
-def search_wiki_vectors(settings: Settings, query_vector: list[float], wiki_prefix: str, top_n: int) -> list[VectorCandidate]:
+def _rel_matches_wiki_prefixes(rel: str, prefixes: list[str]) -> bool:
+    if not prefixes:
+        return True
+    for raw in prefixes:
+        prefix = (raw or "").strip().rstrip("/")
+        if not prefix:
+            return True
+        if rel.startswith(prefix + "/") or rel == prefix:
+            return True
+    return False
+
+
+def search_wiki_vectors(
+    settings: Settings,
+    query_vector: list[float],
+    wiki_prefixes: list[str],
+    top_n: int,
+) -> list[VectorCandidate]:
     idx = _load_index(settings.data_root.resolve())
     out: list[VectorCandidate] = []
-    prefix = (wiki_prefix or "").strip().rstrip("/")
     for _, chunk in idx.get("chunks", {}).items():
         if not isinstance(chunk, dict):
             continue
         rel = str(chunk.get("path") or "")
-        if prefix and not rel.startswith(prefix + "/") and rel != prefix:
+        if not _rel_matches_wiki_prefixes(rel, wiki_prefixes):
             continue
         file_meta = idx.get("files", {}).get(rel)
         if not isinstance(file_meta, dict) or file_meta.get("status") != "embedded":

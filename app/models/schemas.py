@@ -221,9 +221,9 @@ class DialogueRecallBaseParams(BaseModel):
     """wiki 双路召回共用参数（与是否调用 LLM 无关）。"""
 
     query: str = Field(..., description="用户自然语言问句或指令")
-    wiki_prefix: str = Field(
-        default="",
-        description="仅在此 wiki 子路径下扫描（相对路径，空为整层）",
+    wiki_prefixes: list[str] = Field(
+        default_factory=list,
+        description="仅在这些 wiki 子路径下扫描（相对路径列表，空为整层）",
     )
     max_files: int = Field(default=80, ge=1, le=500, description="最多参与扫描的 .md 文件数")
     bm25_top_n: int = Field(default=10, ge=1, le=100, description="BM25 路召回候选条数")
