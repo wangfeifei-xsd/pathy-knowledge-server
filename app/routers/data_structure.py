@@ -35,13 +35,18 @@ async def get_layer_tree(
 @router.post(
     "/folders",
     response_model=DataStructureFolderOpResponse,
-    summary="在层根下新增单层子目录（如 raw/reef）",
+    summary="在层根或指定父目录下新增单层子目录",
 )
 async def create_folder(
     body: DataStructureFolderCreateRequest,
     settings: Settings = Depends(get_settings),
 ) -> DataStructureFolderOpResponse:
-    created = ds_svc.create_folder_under_layer_root(settings.data_root.resolve(), body.layer, body.name)
+    created = ds_svc.create_folder_under_parent(
+        settings.data_root.resolve(),
+        body.layer,
+        body.parent or "",
+        body.name,
+    )
     return DataStructureFolderOpResponse(ok=True, layer=body.layer, path=created)
 
 

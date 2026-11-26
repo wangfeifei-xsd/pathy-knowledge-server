@@ -87,10 +87,21 @@ def build_layer_folder_tree(
 
 def create_folder_under_layer_root(data_root: Path, layer: LayerName, name: str) -> str:
     """仅在层根下创建一层子目录，如 raw/reef。"""
+    return create_folder_under_parent(data_root, layer, "", name)
+
+
+def create_folder_under_parent(
+    data_root: Path, layer: LayerName, parent_rel: str, name: str
+) -> str:
+    """在指定父目录下创建单层子目录；parent_rel 为空时表示层根。"""
     seg = _single_segment(name)
     base = storage.layer_root(data_root, layer)
     storage.ensure_layer_tree(data_root)
-    target = (base / seg).resolve()
+    if parent_rel:
+        parent = resolve_dir_under_layer(data_root, layer, parent_rel)
+    else:
+        parent = base
+    target = (parent / seg).resolve()
     try:
         target.relative_to(base.resolve())
     except ValueError:
@@ -98,7 +109,8 @@ def create_folder_under_layer_root(data_root: Path, layer: LayerName, name: str)
     if target.exists():
         raise HTTPException(status_code=409, detail="该目录已存在")
     target.mkdir(parents=False, exist_ok=False)
-    return seg + "/"
+    rel_after = target.relative_to(base).as_posix()
+    return rel_after + "/" if rel_after != "." else ""
 
 
 def resolve_dir_under_layer(data_root: Path, layer: LayerName, rel_dir: str) -> Path:

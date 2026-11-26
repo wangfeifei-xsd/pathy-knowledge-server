@@ -117,6 +117,19 @@ sequenceDiagram
 
 ## 快速开始
 
+### macOS / Linux 后台启停
+
+在本项目根目录执行以下命令。启动脚本使用 Python 3.11 或更高版本，自动准备 `.venv` 和 `requirements.txt` 中的依赖。
+
+```bash
+./run-scripts/start.sh
+./run-scripts/stop.sh
+```
+
+默认健康检查地址为 `http://127.0.0.1:8765/health`，日志写入 `run-scripts/.runtime/service.log`。可通过 `HOST` 和 `PORT` 指定监听地址和端口，例如 `PORT=8766 ./run-scripts/start.sh`。
+
+### 手动前台启动
+
 ```bash
 # 若当前不在项目目录，先进入：
 # cd pathy-knowledge-server
@@ -136,7 +149,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8765
 在 Windows 项目目录中，使用系统自带 PowerShell 执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\start-server.ps1 -Port 8766
+powershell -ExecutionPolicy Bypass -File .\run-scripts\start-server.ps1 -Port 8766
 ```
 
 启动后访问：
@@ -147,6 +160,8 @@ powershell -ExecutionPolicy Bypass -File .\start-server.ps1 -Port 8766
 ## 重启服务
 
 服务是 **Uvicorn 单进程**，修改了环境变量、`.env`、依赖或代码后，需要**停掉旧进程再启动**新进程才会生效（`get_settings()` 等也会在重启后重新加载）。
+
+通过脚本启动的后台服务可在项目根目录执行 `./run-scripts/stop.sh && ./run-scripts/start.sh` 重启。
 
 **前台运行**（终端里直接执行的 `uvicorn`）：在该终端按 **`Ctrl + C`** 结束进程，再执行与上文相同的 `uvicorn app.main:app ...` 命令。
 

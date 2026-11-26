@@ -529,7 +529,11 @@ class DataFolderTreeNode(BaseModel):
 
 class DataStructureFolderCreateRequest(BaseModel):
     layer: LayerName
-    name: str = Field(..., description="仅在层根下创建的单段目录名，例如 reef → raw/reef/")
+    name: str = Field(..., description="单段目录名，例如 albums")
+    parent: str | None = Field(
+        None,
+        description="父目录相对层根路径，如 reef/ 或 tenants/x/reef/；空则直接在层根下创建",
+    )
 
 
 class DataStructureFolderRenameRequest(BaseModel):
